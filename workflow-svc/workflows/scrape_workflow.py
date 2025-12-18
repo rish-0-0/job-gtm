@@ -11,12 +11,12 @@ class ScrapeWorkflow:
     """
 
     @workflow.run
-    async def run(self, max_pages: int = 10) -> Dict[str, Any]:
+    async def run(self, max_pages: int = 25) -> Dict[str, Any]:
         """
         Execute the scraping workflow for all available scrapers
 
         Args:
-            max_pages: Maximum number of pages to scrape per scraper (default: 10)
+            max_pages: Maximum number of pages to scrape per scraper (default: 25)
 
         Returns:
             Summary of scraping results
@@ -47,11 +47,7 @@ class ScrapeWorkflow:
         # Step 2: Process each scraper concurrently
         scraper_tasks = []
         for scraper_name in scrapers:
-            task = workflow.execute_local_activity(
-                self._scrape_all_pages,
-                args=[scraper_name, max_pages],
-                start_to_close_timeout=timedelta(minutes=60)
-            )
+            task = self._scrape_all_pages(scraper_name, max_pages)
             scraper_tasks.append(task)
 
         # Wait for all scrapers to complete
@@ -130,7 +126,8 @@ class ScrapeWorkflow:
                     scraper_summary["total_jobs_stored"] += stored_count
                     workflow.logger.info(f"Stored {stored_count} jobs from {scraper_name}, page {page}")
                 else:
-                    workflow.logger.info(f"No results from {scraper_name}, page {page}")
+                    workflow.logger.info(f"No results from {scraper_name}, page {page}. Stopping pagination.")
+                    break  # Stop scraping this scraper when we get 0 results
 
                 scraper_summary["pages_scraped"] = page
 

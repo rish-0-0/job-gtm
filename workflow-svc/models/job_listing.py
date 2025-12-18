@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Numeric
+from sqlalchemy import Column, Integer, String, Text, DateTime, Numeric, UniqueConstraint
 from sqlalchemy.sql import func
 from database import Base
 
@@ -7,6 +7,10 @@ class JobListing(Base):
     Model for storing scraped job listings
     """
     __tablename__ = "job_listings"
+    __table_args__ = (
+        UniqueConstraint('company_title', 'job_role', 'job_location', 'employment_type',
+                        name='uq_job_listing_details'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 

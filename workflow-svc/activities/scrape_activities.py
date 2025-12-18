@@ -3,9 +3,10 @@ from typing import Dict, Any, List
 import httpx
 import os
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from database import SessionLocal
 from models.job_listing import JobListing
-from datetime import datetime
+from datetime import datetime, timezone
 
 SCRAPER_URL = os.getenv("SCRAPER_URL", "http://scraper:6000")
 
@@ -67,53 +68,61 @@ async def store_scrape_results(scraper: str, results: List[Dict[str, Any]]) -> i
         results: List of job listings to store
 
     Returns:
-        Number of jobs stored
+        Number of jobs stored (excluding duplicates)
     """
     db: Session = SessionLocal()
     stored_count = 0
+    duplicate_count = 0
 
     try:
         activity.logger.info(f"Storing {len(results)} job listings from {scraper}")
 
         for job_data in results:
-            # Check if job already exists based on posting_url
-            # Note: scraper returns camelCase fields (e.g., postingUrl)
-            posting_url = job_data.get("postingUrl")
-            if posting_url:
-                existing_job = db.query(JobListing).filter(
-                    JobListing.posting_url == posting_url
-                ).first()
+            try:
+                # Note: scraper returns camelCase fields (e.g., postingUrl)
+                posting_url = job_data.get("postingUrl")
 
-                if existing_job:
-                    activity.logger.debug(f"Job already exists: {posting_url}")
-                    continue
+                # Create new job listing
+                # Map camelCase fields from scraper to snake_case fields in database
+                job_listing = JobListing(
+                    company_title=job_data.get("companyTitle", ""),
+                    job_role=job_data.get("jobRole", ""),
+                    job_location=job_data.get("jobLocation"),
+                    employment_type=job_data.get("employmentType"),
+                    salary_range=job_data.get("salaryRange"),
+                    min_salary=job_data.get("minSalary"),
+                    max_salary=job_data.get("maxSalary"),
+                    required_experience=job_data.get("requiredExperience"),
+                    seniority_level=job_data.get("seniorityLevel"),
+                    job_description=job_data.get("jobDescription"),
+                    date_posted=job_data.get("datePosted"),
+                    posting_url=posting_url,
+                    hiring_team=job_data.get("hiringTeam"),
+                    about_company=job_data.get("aboutCompany"),
+                    scraper_source=scraper,
+                    scraped_at=datetime.now(timezone.utc)
+                )
 
-            # Create new job listing
-            # Map camelCase fields from scraper to snake_case fields in database
-            job_listing = JobListing(
-                company_title=job_data.get("companyTitle", ""),
-                job_role=job_data.get("jobRole", ""),
-                job_location=job_data.get("jobLocation"),
-                employment_type=job_data.get("employmentType"),
-                salary_range=job_data.get("salaryRange"),
-                min_salary=job_data.get("minSalary"),
-                max_salary=job_data.get("maxSalary"),
-                required_experience=job_data.get("requiredExperience"),
-                seniority_level=job_data.get("seniorityLevel"),
-                job_description=job_data.get("jobDescription"),
-                date_posted=job_data.get("datePosted"),
-                posting_url=posting_url,
-                hiring_team=job_data.get("hiringTeam"),
-                about_company=job_data.get("aboutCompany"),
-                scraper_source=scraper,
-                scraped_at=datetime.utcnow()
-            )
+                db.add(job_listing)
+                db.flush()  # Flush to catch IntegrityError immediately
+                stored_count += 1
+                activity.logger.info(
+                    f"Inserted new job listing: {job_data.get('companyTitle')} - "
+                    f"{job_data.get('jobRole')} ({posting_url})"
+                )
 
-            db.add(job_listing)
-            stored_count += 1
+            except IntegrityError:
+                # Handle unique constraint violation (duplicate job listing)
+                db.rollback()
+                activity.logger.debug(f"Duplicate job listing skipped: {posting_url}")
+                duplicate_count += 1
+                continue
 
         db.commit()
-        activity.logger.info(f"Successfully stored {stored_count} new job listings from {scraper}")
+        activity.logger.info(
+            f"Successfully stored {stored_count} new job listings from {scraper} "
+            f"({duplicate_count} duplicates skipped)"
+        )
         return stored_count
 
     except Exception as e:

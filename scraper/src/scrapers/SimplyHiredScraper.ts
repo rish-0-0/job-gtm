@@ -55,8 +55,9 @@ export class SimplyHiredScraper extends JobBoardScraper {
 
                     console.log(`Successfully navigated to page ${page}`);
                 } catch (error) {
-                    console.error(`Error navigating to page ${page}:`, error);
-                    throw new Error(`Could not navigate to page ${page}. Page may not exist.`);
+                    console.log(`Error navigating to page ${page}:`, error);
+                    console.log(`Page ${page} may not exist. Returning empty results.`);
+                    return jobs;
                 }
             }
 
@@ -94,7 +95,8 @@ export class SimplyHiredScraper extends JobBoardScraper {
             return jobs;
         } catch (error) {
             console.error('Error during scraping:', error);
-            throw error;
+            // Return empty array instead of throwing to allow workflow to continue
+            return jobs;
         } finally {
             if (this.browser) {
                 await this.browser.close();

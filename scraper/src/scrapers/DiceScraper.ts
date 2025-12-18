@@ -10,6 +10,8 @@ export class DiceScraper extends JobBoardScraper {
         const jobs: JobListing[] = [];
 
         try {
+            console.log(`[DiceScraper] Starting scrape for page ${page}`);
+
             this.browser = await puppeteer.launch({
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -21,23 +23,35 @@ export class DiceScraper extends JobBoardScraper {
             await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
             await this.page.setViewport({ width: 1920, height: 1080 });
 
-            console.log(`Navigating to Dice.com page ${page}...`);
-            await this.page.goto(`https://www.dice.com/jobs?radiusUnit=mi&page=${page}`, {
+            console.log(`[DiceScraper] Navigating to Dice.com page ${page}...`);
+            const response = await this.page.goto(`https://www.dice.com/jobs?radiusUnit=mi&page=${page}`, {
                 waitUntil: 'networkidle2',
                 timeout: 30000
             });
 
-            console.log('Page loaded, waiting for job cards...');
+            // Check if page loaded successfully
+            if (!response || response.status() !== 200) {
+                console.log(`[DiceScraper] Page ${page} returned status ${response?.status()}. Page may not exist. Returning empty results.`);
+                return jobs;
+            }
+
+            console.log(`[DiceScraper] Page ${page} loaded successfully, waiting for job cards...`);
 
             // Wait a bit for dynamic content
             await new Promise(resolve => setTimeout(resolve, 3000));
 
             // Wait for job cards - they are divs with specific classes
-            await this.page.waitForSelector('[data-testid="job-search-job-card-link"]', { timeout: 10000 });
-            console.log('Found job cards!');
+            try {
+                await this.page.waitForSelector('[data-testid="job-search-job-card-link"]', { timeout: 10000 });
+                console.log(`[DiceScraper] Page ${page} - Found job card elements`);
+            } catch (error) {
+                console.log(`[DiceScraper] No job cards found on page ${page}. Page may not exist or has no results. Returning empty results.`);
+                return jobs;
+            }
 
             // Get all job card containers (parent divs that contain all the job info)
             const jobCards = await this.page.$$('div.flex.flex-col.gap-6.overflow-hidden.rounded-lg.border.bg-surface-primary');
+            console.log(`[DiceScraper] Page ${page} - Found ${jobCards.length} job card containers to scrape`);
 
             for (const jobCard of jobCards) {
                 this.currentJobElement = jobCard;
@@ -62,14 +76,16 @@ export class DiceScraper extends JobBoardScraper {
 
                     jobs.push(jobListing);
                 } catch (error) {
-                    console.error('Error scraping job card:', error);
+                    console.error(`[DiceScraper] Error scraping individual job card on page ${page}:`, error);
                 }
             }
 
+            console.log(`[DiceScraper] Page ${page} - Successfully scraped ${jobs.length} job listings`);
             return jobs;
         } catch (error) {
-            console.error('Error during scraping:', error);
-            throw error;
+            console.error(`[DiceScraper] Error during scraping page ${page}:`, error);
+            // Return empty array instead of throwing to allow workflow to continue
+            return jobs;
         } finally {
             if (this.browser) {
                 await this.browser.close();

@@ -33,35 +33,49 @@ def wait_for_postgres():
     print("ERROR: PostgreSQL failed to become ready")
     return False
 
-def run_init_setup():
-    """Run initial setup if needed"""
-    print("Checking initial setup...")
+def init_database():
+    """Initialize database and run migrations"""
+    print("Initializing database...")
     try:
         result = subprocess.run(
-            ["python", "init_setup.py"],
+            ["python", "init_db.py"],
             check=True
         )
         return True
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: Initial setup failed: {e}")
+        print(f"ERROR: Database initialization failed: {e}")
         return False
 
-def run_migrations():
-    """Run database migrations"""
-    print("Running database migrations...")
-    try:
-        result = subprocess.run(
-            ["python", "migrate.py"],
-            check=True
-        )
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: Migrations failed: {e}")
-        return False
+def start_worker():
+    """Start the Temporal worker in background"""
+    print("Starting Temporal worker...")
+    worker_process = subprocess.Popen(
+        ["python", "worker.py"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
+    )
+
+    # Give worker a moment to start
+    time.sleep(2)
+
+    if worker_process.poll() is not None:
+        print("ERROR: Worker failed to start")
+        # Capture and print the error output
+        stdout, stderr = worker_process.communicate()
+        if stdout:
+            print(f"Worker stdout: {stdout}")
+        if stderr:
+            print(f"Worker stderr: {stderr}")
+        return None
+
+    print("✅ Temporal worker started")
+    return worker_process
 
 def start_application():
     """Start the FastAPI application"""
-    print("Starting application...")
+    print("Starting FastAPI application...")
     port = os.getenv("PORT", "8000")
 
     # Use os.execvp to replace the current process
@@ -82,15 +96,17 @@ def main():
     if not wait_for_postgres():
         sys.exit(1)
 
-    # Run initial setup
-    if not run_init_setup():
+    # Initialize database and run migrations
+    if not init_database():
         sys.exit(1)
 
-    # Run migrations
-    if not run_migrations():
+    # Start Temporal worker
+    worker_process = start_worker()
+    if worker_process is None:
         sys.exit(1)
 
-    # Start application
+    # Start application (this will replace the current process)
+    # The worker runs in background
     start_application()
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ app.post<{ Body: ScrapeRequest }>("/scrape", {
     try {
         const { scraper: scraperName, params = { page: 1 } } = request.body;
 
-        app.log.info({ scraperName, params }, "Scraping started");
+        app.log.info({ scraperName, params, requestBody: request.body }, "Scraping started - received params");
 
         if (!ScraperFactory.isScraperAvailable(scraperName)) {
             return reply.status(400).send({
