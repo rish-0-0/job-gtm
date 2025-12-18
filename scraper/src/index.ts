@@ -7,7 +7,10 @@ const app: FastifyInstance = Fastify({ logger: true });
 
 interface ScrapeRequest {
     scraper: string;
-    params?: Record<string, any>;
+    params?: {
+        page: number;
+        [key: string]: any;
+    }
 }
 
 app.post<{ Body: ScrapeRequest }>("/scrape", {
@@ -17,13 +20,15 @@ app.post<{ Body: ScrapeRequest }>("/scrape", {
             required: ["scraper"],
             properties: {
                 scraper: { type: "string" },
-                params: { type: "object" }
+                params: { type: "object", additionalProperties: true, properties: {
+                    page: { type: "number" }
+                }}
             }
         }
     }
 }, async (request: FastifyRequest<{ Body: ScrapeRequest }>, reply: FastifyReply) => {
     try {
-        const { scraper: scraperName, params = {} } = request.body;
+        const { scraper: scraperName, params = { page: 1 } } = request.body;
 
         app.log.info({ scraperName, params }, "Scraping started");
 
@@ -36,7 +41,7 @@ app.post<{ Body: ScrapeRequest }>("/scrape", {
         }
 
         const scraper = ScraperFactory.createScraper(scraperName, params);
-        const result = await scraper.scrape(1);
+        const result = await scraper.scrape(params.page || 1);
 
         app.log.info({ scraperName }, "Scraping completed successfully");
 

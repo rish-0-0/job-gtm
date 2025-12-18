@@ -1,9 +1,9 @@
 import { scraperRegistry } from "./ScraperRegistry";
-import { IndeedScraper } from "./IndeedScraper";
 import { DiceScraper } from "./DiceScraper";
+import { SimplyHiredScraper } from "./SimplyHiredScraper";
 
-scraperRegistry.register("indeed", IndeedScraper);
 scraperRegistry.register("dice", DiceScraper);
+scraperRegistry.register("simplyhired", SimplyHiredScraper);
 
 export { ScraperFactory } from "./ScraperFactory";
 export { JobBoardScraper, JobListing } from "./JobBoardScraper";
