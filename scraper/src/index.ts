@@ -1,0 +1,73 @@
+import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { ScraperFactory } from "./scrapers";
+
+const port: number = process.env.PORT ? parseInt(process.env.PORT) : 6000;
+
+const app: FastifyInstance = Fastify({ logger: true });
+
+interface ScrapeRequest {
+    scraper: string;
+    params?: Record<string, any>;
+}
+
+app.post<{ Body: ScrapeRequest }>("/scrape", {
+    schema: {
+        body: {
+            type: "object",
+            required: ["scraper"],
+            properties: {
+                scraper: { type: "string" },
+                params: { type: "object" }
+            }
+        }
+    }
+}, async (request: FastifyRequest<{ Body: ScrapeRequest }>, reply: FastifyReply) => {
+    try {
+        const { scraper: scraperName, params = {} } = request.body;
+
+        app.log.info({ scraperName, params }, "Scraping started");
+
+        if (!ScraperFactory.isScraperAvailable(scraperName)) {
+            return reply.status(400).send({
+                error: "Invalid scraper",
+                message: `Scraper "${scraperName}" not found`,
+                availableScrapers: ScraperFactory.getAvailableScrapers()
+            });
+        }
+
+        const scraper = ScraperFactory.createScraper(scraperName, params);
+        const result = await scraper.scrape(1);
+
+        app.log.info({ scraperName }, "Scraping completed successfully");
+
+        return reply.status(200).send({
+            success: true,
+            scraper: scraperName,
+            result
+        });
+    } catch (error) {
+        app.log.error({ error }, "Scraping failed");
+        return reply.status(500).send({
+            error: "Scraping failed",
+            message: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+app.get("/scrapers", async (_request: FastifyRequest, reply: FastifyReply) => {
+    return reply.status(200).send({
+        scrapers: ScraperFactory.getAvailableScrapers()
+    });
+});
+
+const start: () => Promise<void> = async () => {
+    try {
+        await app.listen({ port, host: "0.0.0.0" });
+        console.log(`Server is running on port ${port}`);
+    } catch (err) {
+        app.log.error(err);
+        process.exit(1);
+    }
+};
+
+start();

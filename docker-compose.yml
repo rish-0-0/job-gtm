@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  temporal:
+    container_name: temporal
+    image: temporalio/temporal:latest
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    environment:
+      - TEMPORAL_CLI_ADDRESS=localhost:7233
+    command:
+      - server
+      - start-dev
+      - --ip
+      - "0.0.0.0"
+      - --db-filename
+      - /tmp/temporal.db
+      - --ui-port
+      - "8233"
+
+  scraper:
+    container_name: temporal-scraper
+    build:
+      context: ./scraper
+      dockerfile: Dockerfile
+    depends_on:
+      - temporal
+    ports:
+      - "6000:6000"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - PORT=6000
+    restart: unless-stopped
+    # Uncomment to override entrypoint for debugging
+    # command: tail -f /dev/null
