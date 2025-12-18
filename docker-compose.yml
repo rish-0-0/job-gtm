@@ -1,6 +1,24 @@
 version: '3.8'
 
 services:
+  postgres:
+    container_name: postgres-db
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=jobgtm
+      - POSTGRES_PASSWORD=jobgtm_password
+      - POSTGRES_DB=jobgtm
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobgtm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   temporal:
     container_name: temporal
     image: temporalio/temporal:latest
@@ -26,11 +44,31 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - temporal
+      - postgres
     ports:
       - "6000:6000"
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
       - PORT=6000
+      - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
     restart: unless-stopped
     # Uncomment to override entrypoint for debugging
     # command: tail -f /dev/null
+
+  workflow-svc:
+    container_name: workflow-service
+    build:
+      context: ./workflow-svc
+      dockerfile: Dockerfile
+    depends_on:
+      - temporal
+      - scraper
+      - postgres
+    ports:
+      - "8000:8000"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - PORT=8000
+      - SCRAPER_URL=http://scraper:6000
+      - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
+    restart: unless-stopped

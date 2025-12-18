@@ -13,3 +13,7 @@ build/
 .cache/
 .next/
 out/
+
+# Database data
+data/*
+!data/.gitkeep

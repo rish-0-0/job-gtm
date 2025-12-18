@@ -3,7 +3,13 @@ import { ScraperFactory } from "./scrapers";
 
 const port: number = process.env.PORT ? parseInt(process.env.PORT) : 6000;
 
-const app: FastifyInstance = Fastify({ logger: true });
+const app: FastifyInstance = Fastify({
+    logger: true,
+    // Disable all timeouts - scraping can take a long time
+    connectionTimeout: 0,
+    keepAliveTimeout: 0,
+    requestTimeout: 0
+});
 
 interface ScrapeRequest {
     scraper: string;
@@ -23,6 +29,37 @@ app.post<{ Body: ScrapeRequest }>("/scrape", {
                 params: { type: "object", additionalProperties: true, properties: {
                     page: { type: "number" }
                 }}
+            }
+        },
+        response: {
+            200: {
+                type: "object",
+                properties: {
+                    success: { type: "boolean" },
+                    scraper: { type: "string" },
+                    result: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                companyTitle: { type: "string" },
+                                jobRole: { type: "string" },
+                                salaryRange: { type: "string" },
+                                minSalary: { type: ["number", "null"] },
+                                maxSalary: { type: ["number", "null"] },
+                                requiredExperience: { type: "string" },
+                                jobLocation: { type: "string" },
+                                jobDescription: { type: "string" },
+                                datePosted: { type: "string" },
+                                postingUrl: { type: "string" },
+                                seniorityLevel: { type: "string" },
+                                hiringTeam: { type: "string" },
+                                aboutCompany: { type: "string" },
+                                employmentType: { type: "string" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
