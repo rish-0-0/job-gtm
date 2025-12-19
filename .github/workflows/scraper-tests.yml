@@ -1,0 +1,61 @@
+name: Scraper Tests
+
+on:
+  pull_request:
+    paths:
+      - 'scraper/**'
+      - '.github/workflows/scraper-tests.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scraper/**'
+
+jobs:
+  test:
+    name: Run Scraper Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: scraper
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: scraper/package-lock.json
+
+      - name: Install Puppeteer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm-dev \
+            libxkbcommon-dev \
+            libgbm-dev \
+            libasound2 \
+            libatspi2.0-0 \
+            libxshmfence-dev
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "### Scraper Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "All scraper tests completed. Check logs above for details." >> $GITHUB_STEP_SUMMARY
