@@ -4,6 +4,12 @@ import { SimplyHiredScraper } from "../src/scrapers/SimplyHiredScraper";
 
 describe("SimplyHiredScraper", () => {
     it("should scrape job listings from SimplyHired.co.in", async function() {
+        // Skip in CI environment (GitHub Actions blocks SimplyHired requests)
+        if (process.env.CI) {
+            console.log("\n⏭️  Skipping SimplyHired scraper test in CI environment (403 forbidden)\n");
+            this.skip();
+        }
+
         // Increase timeout for web scraping (30 seconds)
         this.timeout(30000);
 
