@@ -24,7 +24,7 @@ export class ZipRecruiterScraper extends JobBoardScraper {
             await this.page.setViewport({ width: 1920, height: 1080 });
 
             console.log(`[ZipRecruiterScraper] Navigating to ZipRecruiter page ${page}...`);
-            const url = `https://www.ziprecruiter.in/jobs/search?d=&l=&lat=&long=&page=${page}&q=`;
+            const url = `https://www.ziprecruiter.in/jobs/search?d=&l=&lat=&long=&page=${page}&q=&remote=on_site&sort=published_at`;
             const response = await this.page.goto(url, {
                 waitUntil: 'networkidle2',
                 timeout: 30000

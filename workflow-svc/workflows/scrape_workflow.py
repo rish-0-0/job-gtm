@@ -3,6 +3,7 @@ from temporalio.common import RetryPolicy
 from datetime import timedelta
 from typing import Dict, Any
 import asyncio
+from const import MAX_PAGES
 
 @workflow.defn
 class ScrapeWorkflow:
@@ -11,30 +12,37 @@ class ScrapeWorkflow:
     """
 
     @workflow.run
-    async def run(self, max_pages: int = 25) -> Dict[str, Any]:
+    async def run(self, max_pages: int = MAX_PAGES, scraper_name: str = None) -> Dict[str, Any]:
         """
-        Execute the scraping workflow for all available scrapers
+        Execute the scraping workflow for all or a specific scraper
 
         Args:
-            max_pages: Maximum number of pages to scrape per scraper (default: 25)
+            max_pages: Maximum number of pages to scrape per scraper (default: MAX_PAGES)
+            scraper_name: Optional - name of specific scraper to run (e.g., 'dice', 'simplyhired')
+                         If None, runs all available scrapers
 
         Returns:
             Summary of scraping results
         """
-        workflow.logger.info(f"Starting scrape workflow with max_pages={max_pages}")
+        workflow.logger.info(f"Starting scrape workflow with max_pages={max_pages}, scraper={scraper_name or 'all'}")
 
-        # Step 1: Get all available scrapers
-        scrapers = await workflow.execute_activity(
-            "get_available_scrapers",
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(
-                initial_interval=timedelta(seconds=1),
-                maximum_interval=timedelta(seconds=10),
-                maximum_attempts=3
+        # Step 1: Get scrapers to process
+        if scraper_name:
+            # Single scraper mode
+            scrapers = [scraper_name]
+            workflow.logger.info(f"Running single scraper: {scraper_name}")
+        else:
+            # All scrapers mode
+            scrapers = await workflow.execute_activity(
+                "get_available_scrapers",
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                    maximum_attempts=3
+                )
             )
-        )
-
-        workflow.logger.info(f"Found {len(scrapers)} scrapers: {scrapers}")
+            workflow.logger.info(f"Found {len(scrapers)} scrapers: {scrapers}")
 
         # Summary of results
         summary = {
