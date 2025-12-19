@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from temporalio.client import Client
 from workflows.scrape_workflow import ScrapeWorkflow
+from const import MAX_PAGES
 
 # Configure logging
 logging.basicConfig(
@@ -82,7 +83,7 @@ async def trigger_scrape_workflow():
             ScrapeWorkflow.run,
             id=workflow_id,
             task_queue=TEMPORAL_TASK_QUEUE,
-            # max_pages defaults to 10 in the workflow
+            # max_pages defaults to MAX_PAGES in the workflow
         )
 
         logger.info(f"Workflow started successfully - ID: {handle.id}, Run ID: {handle.result_run_id}")
@@ -96,6 +97,48 @@ async def trigger_scrape_workflow():
         )
     except Exception as e:
         logger.error(f"Failed to start workflow: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to start workflow: {str(e)}")
+
+@app.post("/workflows/scrape/trigger/{scraper}", response_model=WorkflowResponse)
+async def trigger_single_scraper_workflow(scraper: str):
+    """
+    Trigger the scraping workflow for a specific scraper
+
+    Args:
+        scraper: Name of the scraper (e.g., 'dice', 'simplyhired', 'ziprecruiter')
+
+    Returns:
+        WorkflowResponse with workflow_id, run_id, and status
+    """
+    try:
+        logger.info(f"Connecting to Temporal at {TEMPORAL_ADDRESS}")
+        client = await Client.connect(TEMPORAL_ADDRESS)
+        logger.info("Connected to Temporal successfully")
+
+        # Generate unique workflow ID
+        workflow_id = f"scrape-{scraper}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+        logger.info(f"Starting workflow with ID: {workflow_id} for scraper: {scraper}")
+
+        # Start the scraping workflow with specific scraper
+        handle = await client.start_workflow(
+            ScrapeWorkflow.run,
+            id=workflow_id,
+            task_queue=TEMPORAL_TASK_QUEUE,
+            args=[MAX_PAGES, scraper],  # max_pages=MAX_PAGES, scraper_name=scraper
+        )
+
+        logger.info(f"Workflow started successfully - ID: {handle.id}, Run ID: {handle.result_run_id}")
+        logger.info(f"Task Queue: {TEMPORAL_TASK_QUEUE}")
+        logger.info(f"Scraper: {scraper}")
+        logger.info(f"View workflow in Temporal UI: http://localhost:8233/namespaces/default/workflows/{handle.id}")
+
+        return WorkflowResponse(
+            workflow_id=handle.id,
+            run_id=handle.result_run_id,
+            status="started"
+        )
+    except Exception as e:
+        logger.error(f"Failed to start workflow for scraper {scraper}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to start workflow: {str(e)}")
 
 @app.post("/workflows/ai", response_model=WorkflowResponse)

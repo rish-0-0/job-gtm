@@ -5,12 +5,18 @@ export class ZipRecruiterScraper extends JobBoardScraper {
     private browser: Browser | null = null;
     private page: Page | null = null;
     private currentJobElement: any = null;
+    private city: string;
+
+    constructor(city: string = "Bengaluru") {
+        super();
+        this.city = city;
+    }
 
     public async scrape(page: number): Promise<JobListing[]> {
         const jobs: JobListing[] = [];
 
         try {
-            console.log(`[ZipRecruiterScraper] Starting scrape for page ${page}`);
+            console.log(`[ZipRecruiterScraper-${this.city}] Starting scrape for page ${page}`);
 
             this.browser = await puppeteer.launch({
                 headless: true,
@@ -23,8 +29,8 @@ export class ZipRecruiterScraper extends JobBoardScraper {
             await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
             await this.page.setViewport({ width: 1920, height: 1080 });
 
-            console.log(`[ZipRecruiterScraper] Navigating to ZipRecruiter page ${page}...`);
-            const url = `https://www.ziprecruiter.in/jobs/search?d=&l=&lat=&long=&page=${page}&q=`;
+            console.log(`[ZipRecruiterScraper-${this.city}] Navigating to ZipRecruiter page ${page}...`);
+            const url = `https://www.ziprecruiter.in/jobs/search?city=${encodeURIComponent(this.city)}&remote=on_site&sort=published_at&page=${page}`;
             const response = await this.page.goto(url, {
                 waitUntil: 'networkidle2',
                 timeout: 30000
@@ -32,11 +38,11 @@ export class ZipRecruiterScraper extends JobBoardScraper {
 
             // Check if page loaded successfully
             if (!response || response.status() !== 200) {
-                console.log(`[ZipRecruiterScraper] Page ${page} returned status ${response?.status()}. Page may not exist. Returning empty results.`);
+                console.log(`[ZipRecruiterScraper-${this.city}] Page ${page} returned status ${response?.status()}. Page may not exist. Returning empty results.`);
                 return jobs;
             }
 
-            console.log(`[ZipRecruiterScraper] Page ${page} loaded successfully, waiting for job cards...`);
+            console.log(`[ZipRecruiterScraper-${this.city}] Page ${page} loaded successfully, waiting for job cards...`);
 
             // Wait a bit for dynamic content
             await new Promise(resolve => setTimeout(resolve, 3000));
@@ -44,15 +50,15 @@ export class ZipRecruiterScraper extends JobBoardScraper {
             // Wait for job listings
             try {
                 await this.page.waitForSelector('li.job-listing', { timeout: 10000 });
-                console.log(`[ZipRecruiterScraper] Page ${page} - Found job listing elements`);
+                console.log(`[ZipRecruiterScraper-${this.city}] Page ${page} - Found job listing elements`);
             } catch (error) {
-                console.log(`[ZipRecruiterScraper] No job listings found on page ${page}. Page may not exist or has no results. Returning empty results.`);
+                console.log(`[ZipRecruiterScraper-${this.city}] No job listings found on page ${page}. Page may not exist or has no results. Returning empty results.`);
                 return jobs;
             }
 
             // Get all job listing containers
             const jobCards = await this.page.$$('li.job-listing');
-            console.log(`[ZipRecruiterScraper] Page ${page} - Found ${jobCards.length} job listings to scrape`);
+            console.log(`[ZipRecruiterScraper-${this.city}] Page ${page} - Found ${jobCards.length} job listings to scrape`);
 
             for (const jobCard of jobCards) {
                 this.currentJobElement = jobCard;
@@ -77,14 +83,14 @@ export class ZipRecruiterScraper extends JobBoardScraper {
 
                     jobs.push(jobListing);
                 } catch (error) {
-                    console.error(`[ZipRecruiterScraper] Error scraping individual job card on page ${page}:`, error);
+                    console.error(`[ZipRecruiterScraper-${this.city}] Error scraping individual job card on page ${page}:`, error);
                 }
             }
 
-            console.log(`[ZipRecruiterScraper] Page ${page} - Successfully scraped ${jobs.length} job listings`);
+            console.log(`[ZipRecruiterScraper-${this.city}] Page ${page} - Successfully scraped ${jobs.length} job listings`);
             return jobs;
         } catch (error) {
-            console.error(`[ZipRecruiterScraper] Error during scraping page ${page}:`, error);
+            console.error(`[ZipRecruiterScraper-${this.city}] Error during scraping page ${page}:`, error);
             // Return empty array instead of throwing to allow workflow to continue
             return jobs;
         } finally {
