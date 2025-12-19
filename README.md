@@ -4,14 +4,22 @@
 
 This platform consists of:
 - **PostgreSQL Database**: Persistent data storage (port 5432)
+- **RabbitMQ**: Message queue for reliable job data processing (ports 5672, 15672)
 - **Temporal Server**: Workflow orchestration engine (ports 7233, 8233)
 - **Scraper Service**: API service for triggering web scrapers with Puppeteer pre-installed (port 6000)
 - **Workflow Service**: FastAPI service for orchestrating scraping and AI workflows via Temporal (port 8000)
+- **Queue Consumer**: Background service for processing scraped jobs from RabbitMQ
+- **Ollama LLM**: GPU-accelerated local LLM service with Llama 3.2 3B (port 11434) - See [OLLAMA_SETUP.md](OLLAMA_SETUP.md)
 
 ## Prerequisites
 
 - Docker and Docker Compose installed
-- At least 2GB of free disk space (Puppeteer image is ~400MB)
+- At least 5GB of free disk space
+  - Puppeteer image: ~400MB
+  - Ollama + Llama 3.2 3B model: ~2GB
+  - Database and logs: ~2-3GB
+- **For GPU support (Ollama)**: NVIDIA GPU with CUDA support + nvidia-container-toolkit
+  - See [OLLAMA_SETUP.md](OLLAMA_SETUP.md) for GPU setup instructions
 
 ## Building and Running
 

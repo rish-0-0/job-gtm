@@ -109,3 +109,40 @@ services:
     entrypoint: []
     command: ["python", "consumer.py"]
     restart: unless-stopped
+
+  ollama:
+    container_name: ollama-llm
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ollama-init:
+    container_name: ollama-init
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./init_scripts:/scripts
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/bash", "/scripts/ollama-init.sh"]
+    restart: "no"
