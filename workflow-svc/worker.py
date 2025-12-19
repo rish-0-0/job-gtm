@@ -13,8 +13,11 @@ from workflows.scrape_workflow import ScrapeWorkflow
 from activities.scrape_activities import (
     get_available_scrapers,
     call_scraper_service,
-    store_scrape_results,
 )
+from activities.queue_activities import (
+    publish_scrape_results,
+)
+from queue_config import setup_queues, close_rabbitmq_connection
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +38,15 @@ async def main():
     client = await Client.connect(TEMPORAL_ADDRESS)
     logger.info("Connected to Temporal successfully")
 
+    # Setup RabbitMQ queues
+    logger.info("Setting up RabbitMQ queues...")
+    try:
+        await setup_queues()
+        logger.info("RabbitMQ queues setup complete")
+    except Exception as e:
+        logger.error(f"Failed to setup RabbitMQ queues: {str(e)}")
+        raise
+
     # Create worker with increased concurrency
     logger.info(f"Starting worker on task queue: {TEMPORAL_TASK_QUEUE}")
     worker = Worker(
@@ -44,7 +56,7 @@ async def main():
         activities=[
             get_available_scrapers,
             call_scraper_service,
-            store_scrape_results,
+            publish_scrape_results,
         ],
         max_concurrent_workflow_tasks=200,  # Allow more concurrent workflow executions
         max_concurrent_activities=100,  # Allow more concurrent activity executions
@@ -52,10 +64,14 @@ async def main():
 
     logger.info("Worker started and ready to process workflows")
     logger.info(f"Registered workflows: {[ScrapeWorkflow.__name__]}")
-    logger.info(f"Registered activities: {['get_available_scrapers', 'call_scraper_service', 'store_scrape_results']}")
+    logger.info(f"Registered activities: {['get_available_scrapers', 'call_scraper_service', 'publish_scrape_results']}")
 
     # Run the worker
-    await worker.run()
+    try:
+        await worker.run()
+    finally:
+        # Cleanup RabbitMQ connection on shutdown
+        await close_rabbitmq_connection()
 
 
 if __name__ == "__main__":

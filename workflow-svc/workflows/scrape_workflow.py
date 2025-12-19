@@ -3,7 +3,7 @@ from temporalio.common import RetryPolicy
 from datetime import timedelta
 from typing import Dict, Any
 import asyncio
-from const import MAX_PAGES
+from const import MAX_PAGES, CONCURRENT_PAGES_PER_SCRAPER, BATCH_DELAY_SECONDS
 
 @workflow.defn
 class ScrapeWorkflow:
@@ -76,16 +76,13 @@ class ScrapeWorkflow:
                 summary["scrapers_processed"].append(result)
                 summary["total_jobs_stored"] += result.get("total_jobs_stored", 0)
 
-        workflow.logger.info(f"Scrape workflow completed. Total jobs stored: {summary['total_jobs_stored']}")
-
-        # Step 5: Future enhancement - raise message queue event
-        # TODO: Add message queue notification for downstream processing
+        workflow.logger.info(f"Scrape workflow completed. Total jobs published to queue: {summary['total_jobs_stored']}")
 
         return summary
 
     async def _scrape_all_pages(self, scraper_name: str, max_pages: int) -> Dict[str, Any]:
         """
-        Scrape all pages for a specific scraper
+        Scrape all pages for a specific scraper in parallel batches to avoid DDoS detection
 
         Args:
             scraper_name: Name of the scraper
@@ -101,48 +98,98 @@ class ScrapeWorkflow:
             "total_jobs_stored": 0
         }
 
-        # Step 3 & 4: Loop through pages, scraping and storing results
-        for page in range(1, max_pages + 1):
-            try:
-                workflow.logger.info(f"Scraping {scraper_name}, page {page}")
+        workflow.logger.info(
+            f"Starting batched parallel scraping of {max_pages} pages for {scraper_name} "
+            f"({CONCURRENT_PAGES_PER_SCRAPER} concurrent requests per batch, "
+            f"{BATCH_DELAY_SECONDS}s delay between batches)"
+        )
 
-                # Call scraper service to get jobs
-                results = await workflow.execute_activity(
-                    "call_scraper_service",
-                    args=[scraper_name, page],
-                    start_to_close_timeout=timedelta(minutes=10),
-                    retry_policy=RetryPolicy(
-                        initial_interval=timedelta(seconds=5),
-                        maximum_interval=timedelta(seconds=30),
-                        maximum_attempts=3
-                    )
-                )
+        # Step 3: Process pages in batches to avoid DDoS detection
+        all_page_results = []
 
-                # Store results in database
-                if results:
-                    stored_count = await workflow.execute_activity(
-                        "store_scrape_results",
-                        args=[scraper_name, results],
-                        start_to_close_timeout=timedelta(minutes=5),
-                        retry_policy=RetryPolicy(
-                            initial_interval=timedelta(seconds=2),
-                            maximum_interval=timedelta(seconds=10),
-                            maximum_attempts=5
-                        )
-                    )
+        for batch_start in range(1, max_pages + 1, CONCURRENT_PAGES_PER_SCRAPER):
+            batch_end = min(batch_start + CONCURRENT_PAGES_PER_SCRAPER, max_pages + 1)
+            batch_pages = list(range(batch_start, batch_end))
 
-                    scraper_summary["total_jobs_stored"] += stored_count
-                    workflow.logger.info(f"Stored {stored_count} jobs from {scraper_name}, page {page}")
-                else:
-                    workflow.logger.info(f"No results from {scraper_name}, page {page}. Stopping pagination.")
-                    break  # Stop scraping this scraper when we get 0 results
+            workflow.logger.info(f"Starting batch: pages {batch_start}-{batch_end-1} for {scraper_name}")
 
-                scraper_summary["pages_scraped"] = page
+            # Launch this batch of pages in parallel
+            batch_tasks = [self._scrape_single_page(scraper_name, page) for page in batch_pages]
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            all_page_results.extend(batch_results)
 
-            except Exception as e:
-                workflow.logger.error(f"Error scraping {scraper_name}, page {page}: {str(e)}")
-                scraper_summary["status"] = "partial"
-                scraper_summary["last_error"] = str(e)
-                break
+            # Add delay between batches (except after the last batch)
+            if batch_end <= max_pages:
+                workflow.logger.info(f"Waiting {BATCH_DELAY_SECONDS}s before next batch to avoid rate limiting")
+                await asyncio.sleep(BATCH_DELAY_SECONDS)
+
+        # Step 4: Process results from all pages
+        successful_pages = 0
+        failed_pages = 0
+
+        for page_num, result in enumerate(all_page_results, start=1):
+            if isinstance(result, Exception):
+                workflow.logger.error(f"Page {page_num} of {scraper_name} failed: {str(result)}")
+                failed_pages += 1
+            elif result is not None:
+                stored_count = result.get("stored_count", 0)
+                scraper_summary["total_jobs_stored"] += stored_count
+                successful_pages += 1
+                if stored_count > 0:
+                    workflow.logger.info(f"Page {page_num} of {scraper_name}: stored {stored_count} jobs")
+
+        scraper_summary["pages_scraped"] = successful_pages
+
+        if failed_pages > 0:
+            scraper_summary["status"] = "partial"
+            scraper_summary["failed_pages"] = failed_pages
+            workflow.logger.warning(f"{scraper_name} completed with {failed_pages} failed pages")
+        else:
+            workflow.logger.info(f"{scraper_name} completed successfully: {successful_pages} pages, {scraper_summary['total_jobs_stored']} jobs stored")
 
         return scraper_summary
+
+    async def _scrape_single_page(self, scraper_name: str, page: int) -> Dict[str, Any]:
+        """
+        Scrape a single page and publish results to queue
+
+        Args:
+            scraper_name: Name of the scraper
+            page: Page number to scrape
+
+        Returns:
+            Dictionary with published_count
+        """
+        try:
+            # Call scraper service to get jobs
+            results = await workflow.execute_activity(
+                "call_scraper_service",
+                args=[scraper_name, page],
+                start_to_close_timeout=timedelta(minutes=10),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=5),
+                    maximum_interval=timedelta(seconds=30),
+                    maximum_attempts=3
+                )
+            )
+
+            # Publish results to queue if we got any
+            if results:
+                published_count = await workflow.execute_activity(
+                    "publish_scrape_results",
+                    args=[scraper_name, results],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(
+                        initial_interval=timedelta(seconds=1),
+                        maximum_interval=timedelta(seconds=10),
+                        maximum_attempts=5
+                    )
+                )
+                return {"stored_count": published_count}
+            else:
+                # Empty page - this is normal, just return 0
+                return {"stored_count": 0}
+
+        except Exception as e:
+            workflow.logger.error(f"Error scraping {scraper_name}, page {page}: {str(e)}")
+            raise
