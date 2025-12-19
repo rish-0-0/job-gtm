@@ -1,22 +1,22 @@
 import { describe, it } from "mocha";
 import { expect } from "chai";
-import { SimplyHiredScraper } from "../src/scrapers/SimplyHiredScraper";
+import { ZipRecruiterScraper } from "../src/scrapers/ZipRecruiterScraper";
 
-describe("SimplyHiredScraper", () => {
-    it("should scrape job listings from SimplyHired.co.in", async function() {
-        // Skip in CI environment (GitHub Actions blocks SimplyHired requests)
+describe("ZipRecruiterScraper", () => {
+    it("should scrape job listings from ZipRecruiter.in", async function() {
+        // Skip in CI environment (GitHub Actions blocks ZipRecruiter requests)
         if (process.env.CI) {
-            console.log("\n⏭️  Skipping SimplyHired scraper test in CI environment (403 forbidden)\n");
+            console.log("\n⏭️  Skipping ZipRecruiter scraper test in CI environment (403 forbidden)\n");
             this.skip();
         }
 
         // Increase timeout for web scraping (30 seconds)
         this.timeout(30000);
 
-        const scraper = new SimplyHiredScraper();
+        const scraper = new ZipRecruiterScraper();
 
-        console.log("\n🚀 Starting SimplyHired scraper test...");
-        console.log("Scraping page 1 from https://www.simplyhired.co.in/search?l=bangalore,karnataka\n");
+        console.log("\n🚀 Starting ZipRecruiter scraper test...");
+        console.log("Scraping page 1 from https://www.ziprecruiter.in/jobs/search\n");
 
         const results = await scraper.scrape(1);
 
@@ -74,6 +74,15 @@ describe("SimplyHiredScraper", () => {
             // At minimum, job should have a company name and role
             expect(firstJob.companyTitle).to.be.a("string");
             expect(firstJob.jobRole).to.be.a("string");
+            expect(firstJob.postingUrl).to.be.a("string");
+
+            // Verify URL is properly formatted
+            if (firstJob.postingUrl) {
+                expect(firstJob.postingUrl).to.satisfy((url: string) =>
+                    url.startsWith('http://') || url.startsWith('https://'),
+                    'URL should start with http:// or https://'
+                );
+            }
 
             console.log("✅ All job listing fields verified successfully!");
         }
