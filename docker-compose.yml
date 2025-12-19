@@ -146,3 +146,43 @@ services:
       - OLLAMA_HOST=ollama:11434
     entrypoint: ["/bin/bash", "/scripts/ollama-init.sh"]
     restart: "no"
+
+  ai-enrichment-consumer:
+    container_name: ai-enrichment-consumer
+    build:
+      context: ./workflow-svc
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
+      - RABBITMQ_URL=amqp://jobgtm:jobgtm_password@rabbitmq:5672/
+      - OLLAMA_URL=http://ollama:11434
+      - SCRAPER_URL=http://scraper:6000
+      - PYTHONUNBUFFERED=1
+    entrypoint: []
+    command: ["python", "consumers/ai_enrichment_consumer.py"]
+    restart: unless-stopped
+
+  golden-job-consumer:
+    container_name: golden-job-consumer
+    build:
+      context: ./workflow-svc
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
+      - RABBITMQ_URL=amqp://jobgtm:jobgtm_password@rabbitmq:5672/
+      - PYTHONUNBUFFERED=1
+    entrypoint: []
+    command: ["python", "consumers/golden_job_consumer.py"]
+    restart: unless-stopped

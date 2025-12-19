@@ -1,5 +1,5 @@
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { ScraperFactory } from "./scrapers";
+import { ScraperFactory, DetailScraperFactory } from "./scrapers";
 
 const port: number = process.env.PORT ? parseInt(process.env.PORT) : 6000;
 
@@ -99,6 +99,94 @@ app.post<{ Body: ScrapeRequest }>("/scrape", {
 app.get("/scrapers", async (_request: FastifyRequest, reply: FastifyReply) => {
     return reply.status(200).send({
         scrapers: ScraperFactory.getAvailableScrapers()
+    });
+});
+
+// Detail scraping endpoint - scrapes a single job URL for full details
+interface ScrapeDetailRequest {
+    url: string;
+    scraper?: string; // Optional - will auto-detect from URL if not provided
+}
+
+app.post<{ Body: ScrapeDetailRequest }>("/scrape-detail", {
+    schema: {
+        body: {
+            type: "object",
+            required: ["url"],
+            properties: {
+                url: { type: "string" },
+                scraper: { type: "string" }
+            }
+        },
+        response: {
+            200: {
+                type: "object",
+                properties: {
+                    success: { type: "boolean" },
+                    scraper: { type: "string" },
+                    result: {
+                        type: "object",
+                        properties: {
+                            jobDescriptionFull: { type: "string" },
+                            fullPageText: { type: "string" },
+                            scrapedUrl: { type: "string" },
+                            scrapeSuccess: { type: "boolean" },
+                            scrapeError: { type: ["string", "null"] },
+                            scrapeDurationMs: { type: "number" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}, async (request: FastifyRequest<{ Body: ScrapeDetailRequest }>, reply: FastifyReply) => {
+    try {
+        const { url, scraper: requestedScraper } = request.body;
+
+        // Detect scraper from URL if not provided
+        const scraperName = requestedScraper || DetailScraperFactory.detectScraperFromUrl(url);
+
+        if (!scraperName) {
+            return reply.status(400).send({
+                error: "Cannot detect scraper",
+                message: `Could not detect scraper for URL: ${url}. Please specify a scraper.`,
+                availableScrapers: DetailScraperFactory.getAvailableScrapers()
+            });
+        }
+
+        app.log.info({ scraperName, url }, "Detail scraping started");
+
+        if (!DetailScraperFactory.isScraperAvailable(scraperName)) {
+            return reply.status(400).send({
+                error: "Invalid scraper",
+                message: `Detail scraper "${scraperName}" not found`,
+                availableScrapers: DetailScraperFactory.getAvailableScrapers()
+            });
+        }
+
+        const scraper = DetailScraperFactory.createScraper(scraperName);
+        const result = await scraper.scrapeJobDetails(url);
+
+        app.log.info({ scraperName, success: result.scrapeSuccess, durationMs: result.scrapeDurationMs }, "Detail scraping completed");
+
+        return reply.status(200).send({
+            success: result.scrapeSuccess,
+            scraper: scraperName,
+            result
+        });
+    } catch (error) {
+        app.log.error({ error }, "Detail scraping failed");
+        return reply.status(500).send({
+            error: "Detail scraping failed",
+            message: error instanceof Error ? error.message : "Unknown error"
+        });
+    }
+});
+
+// Get available detail scrapers
+app.get("/detail-scrapers", async (_request: FastifyRequest, reply: FastifyReply) => {
+    return reply.status(200).send({
+        scrapers: DetailScraperFactory.getAvailableScrapers()
     });
 });
 
