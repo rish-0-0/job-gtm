@@ -30,6 +30,10 @@ def upgrade() -> None:
     op.add_column('job_listings_golden',
         sa.Column('detail_scrape_errors', postgresql.JSONB(astext_type=sa.Text()), nullable=True)
     )
+    # Add full_page_text column for storing raw page content for AI processing
+    op.add_column('job_listings_golden',
+        sa.Column('full_page_text', sa.Text(), nullable=True)
+    )
 
     # Create index on detail_scrape_status for efficient querying
     op.create_index(
@@ -42,6 +46,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index(op.f('ix_job_listings_golden_detail_scrape_status'), table_name='job_listings_golden')
+    op.drop_column('job_listings_golden', 'full_page_text')
     op.drop_column('job_listings_golden', 'detail_scrape_errors')
     op.drop_column('job_listings_golden', 'detail_scrape_duration_ms')
     op.drop_column('job_listings_golden', 'detail_scrape_status')

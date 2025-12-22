@@ -76,8 +76,10 @@ class JobListingGolden(Base):
     stock_options_details = Column(Text)
     other_benefits = Column(JSONB)
 
-    # Full job details (from deep scrape)
-    job_description_full = Column(Text)
+    # Full job details (from detail scrape - Phase 1)
+    # These fields are populated by the detail scraper before AI enrichment
+    job_description_full = Column(Text)  # Main job description from detail page
+    full_page_text = Column(Text)  # Raw page text for AI to process
     job_requirements = Column(JSONB)
     job_benefits = Column(JSONB)
 
@@ -92,12 +94,15 @@ class JobListingGolden(Base):
     scraped_at = Column(DateTime(timezone=True))
 
     # Detail scraping metadata (Phase 1: scrape job URLs for full details)
+    # Status flow: None -> pending -> completed/failed
+    # Only rows with detail_scrape_status='completed' can proceed to enrichment
     detail_scraped_at = Column(DateTime(timezone=True))
     detail_scrape_status = Column(String(50), index=True)  # pending, completed, failed
     detail_scrape_duration_ms = Column(Integer)
     detail_scrape_errors = Column(JSONB)
 
     # Processing metadata (Phase 2: AI enrichment)
+    # IMPORTANT: Enrichment can ONLY run on rows where detail_scrape_status='completed'
     enriched_at = Column(DateTime(timezone=True))
     ollama_model_version = Column(String(50))
     processing_duration_ms = Column(Integer)

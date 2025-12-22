@@ -8,7 +8,7 @@ from temporalio import activity
 from aio_pika import Message, DeliveryMode
 
 from database import SessionLocal
-from models import JobListing, JobListingGolden
+from models import JobListingGolden
 from queue_config import get_rabbitmq_channel, RAW_JOBS_QUEUE, RAW_JOBS_EXCHANGE
 
 logger = logging.getLogger(__name__)
@@ -54,9 +54,12 @@ async def fetch_jobs_for_enrichment(skip_already_enriched: bool = True) -> List[
             if idx % 100 == 0:
                 logger.info(f"[Enrichment Activity] Converted {idx}/{len(jobs)} jobs to dictionaries")
             result.append({
+                # Golden table ID (use this for updates)
                 'id': job.id,
                 'source_job_id': job.source_job_id,
                 'posting_url': job.posting_url,
+
+                # Raw data from card scrape
                 'company_title': job.company_title,
                 'job_role': job.job_role,
                 'job_location': job.job_location_raw,
@@ -66,10 +69,13 @@ async def fetch_jobs_for_enrichment(skip_already_enriched: bool = True) -> List[
                 'max_salary': float(job.max_salary_raw) if job.max_salary_raw else None,
                 'required_experience': job.required_experience,
                 'seniority_level': job.seniority_level_raw,
-                # Full job description from Phase 1 detail scraping - AI will extract all details
-                'job_description_full': job.job_description_full,
                 'about_company': job.about_company_raw,
                 'hiring_team': job.hiring_team_raw,
+
+                # Full content from Phase 1 detail scraping - AI will extract all details
+                'job_description_full': job.job_description_full,
+                'full_page_text': job.full_page_text,
+
                 # Metadata
                 'date_posted': job.date_posted,
                 'scraper_source': job.scraper_source,

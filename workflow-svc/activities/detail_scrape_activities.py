@@ -2,14 +2,22 @@
 Temporal activities for detail scraping workflow
 """
 import os
+import json
 import logging
+import traceback
 import httpx
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from temporalio import activity
+from aio_pika import Message, DeliveryMode
 
 from database import SessionLocal
 from models import JobListing, JobListingGolden
+from queue_config import (
+    get_rabbitmq_channel,
+    DETAIL_SCRAPED_JOBS_QUEUE,
+    DETAIL_SCRAPED_JOBS_EXCHANGE
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,44 +26,72 @@ SCRAPER_TIMEOUT = 60.0  # 60 seconds per job scrape
 
 
 @activity.defn
-async def fetch_jobs_for_detail_scraping(
-    skip_already_scraped: bool = True,
-    limit: Optional[int] = None
-) -> List[Dict[str, Any]]:
+async def get_jobs_chunk_info(chunk_size: int = 100) -> Dict[str, Any]:
     """
-    Fetch jobs from job_listings that need detail scraping.
+    Get total job count and chunk information for parallel processing.
+    This is a lightweight activity that only fetches counts, not data.
 
     Args:
-        skip_already_scraped: If True, exclude jobs already detail-scraped
-        limit: Maximum number of jobs to fetch (None = all)
+        chunk_size: Number of jobs per chunk
 
     Returns:
-        List of job dictionaries with posting_url and source info
+        Dictionary with total count, chunk count, and chunk definitions
     """
     db = SessionLocal()
     try:
-        logger.info("[Detail Scrape Activity] Fetching jobs for detail scraping...")
+        print(f"[Detail Scrape Activity] Getting job chunk info with chunk_size={chunk_size}...", flush=True)
 
-        query = db.query(JobListing)
+        total_count = db.query(JobListing).count()
+        print(f"[Detail Scrape Activity] Total jobs in table: {total_count}", flush=True)
 
-        if skip_already_scraped:
-            # Get posting URLs that are already detail-scraped
-            scraped_urls_query = db.query(JobListingGolden.posting_url).filter(
-                JobListingGolden.detail_scrape_status == 'completed'
-            )
-            scraped_urls = [url[0] for url in scraped_urls_query.all()]
+        # Calculate chunks
+        chunk_count = (total_count + chunk_size - 1) // chunk_size  # Ceiling division
+        chunks = []
+        for i in range(chunk_count):
+            offset = i * chunk_size
+            limit = min(chunk_size, total_count - offset)
+            chunks.append({
+                'chunk_index': i,
+                'offset': offset,
+                'limit': limit
+            })
 
-            logger.info(f"[Detail Scrape Activity] Found {len(scraped_urls)} already detail-scraped jobs")
+        print(f"[Detail Scrape Activity] Created {chunk_count} chunks", flush=True)
 
-            if scraped_urls:
-                query = query.filter(~JobListing.posting_url.in_(scraped_urls))
+        return {
+            'total_jobs': total_count,
+            'chunk_size': chunk_size,
+            'chunk_count': chunk_count,
+            'chunks': chunks
+        }
 
-        if limit:
-            query = query.limit(limit)
+    except Exception as e:
+        error_msg = f"[Detail Scrape Activity] ❌ Failed to get chunk info: {str(e)}"
+        print(error_msg, flush=True)
+        logger.error(error_msg)
+        raise
+    finally:
+        db.close()
 
-        jobs = query.all()
 
-        logger.info(f"[Detail Scrape Activity] Found {len(jobs)} jobs needing detail scraping")
+@activity.defn
+async def fetch_jobs_chunk(offset: int, limit: int) -> List[Dict[str, Any]]:
+    """
+    Fetch a specific chunk of jobs for detail scraping.
+
+    Args:
+        offset: Starting position
+        limit: Number of jobs to fetch
+
+    Returns:
+        List of job dictionaries
+    """
+    db = SessionLocal()
+    try:
+        print(f"[Detail Scrape Activity] Fetching chunk: offset={offset}, limit={limit}...", flush=True)
+
+        jobs = db.query(JobListing).offset(offset).limit(limit).all()
+        print(f"[Detail Scrape Activity] Query returned {len(jobs)} jobs", flush=True)
 
         result = []
         for job in jobs:
@@ -79,11 +115,14 @@ async def fetch_jobs_for_detail_scraping(
                 'scraped_at': job.scraped_at.isoformat() if job.scraped_at else None,
             })
 
-        logger.info(f"[Detail Scrape Activity] ✅ Prepared {len(result)} jobs for detail scraping")
+        print(f"[Detail Scrape Activity] ✅ Prepared chunk with {len(result)} jobs", flush=True)
         return result
 
     except Exception as e:
-        logger.error(f"[Detail Scrape Activity] ❌ Failed to fetch jobs: {str(e)}")
+        error_msg = f"[Detail Scrape Activity] ❌ Failed to fetch chunk: {str(e)}"
+        print(error_msg, flush=True)
+        print(traceback.format_exc(), flush=True)
+        logger.error(error_msg)
         raise
     finally:
         db.close()
@@ -192,6 +231,7 @@ async def save_detail_scraped_job(job: Dict[str, Any]) -> bool:
             # Update existing record with detail scrape data
             # We only store the full description and page text - AI will extract everything else
             existing.job_description_full = job.get('job_description_full')
+            existing.full_page_text = job.get('full_page_text')
 
             # Preserve original fields from raw job
             if not existing.hiring_team_raw and job.get('hiring_team'):
@@ -230,8 +270,9 @@ async def save_detail_scraped_job(job: Dict[str, Any]) -> bool:
                 required_experience=job.get('required_experience'),
                 seniority_level_raw=job.get('seniority_level'),
 
-                # Detail scraped field - the full job description for AI to process
+                # Detail scraped fields - the full content for AI to process
                 job_description_full=job.get('job_description_full'),
+                full_page_text=job.get('full_page_text'),
 
                 # Original data from card scrape
                 about_company_raw=job.get('about_company'),
@@ -264,6 +305,56 @@ async def save_detail_scraped_job(job: Dict[str, Any]) -> bool:
         raise
     finally:
         db.close()
+
+
+@activity.defn
+async def publish_detail_scraped_jobs(jobs: List[Dict[str, Any]]) -> int:
+    """
+    Publish detail-scraped jobs to the queue for downstream processing.
+
+    Args:
+        jobs: List of job dictionaries with scraped details
+
+    Returns:
+        Number of jobs published
+    """
+    try:
+        channel = await get_rabbitmq_channel()
+        exchange = await channel.get_exchange(DETAIL_SCRAPED_JOBS_EXCHANGE)
+
+        published_count = 0
+
+        logger.info(f"[Detail Scrape Activity] 📤 Publishing {len(jobs)} jobs to {DETAIL_SCRAPED_JOBS_QUEUE} queue")
+
+        for idx, job in enumerate(jobs, 1):
+            # Only publish successfully scraped jobs
+            if not job.get('detail_scrape_success'):
+                continue
+
+            message = Message(
+                body=json.dumps(job).encode(),
+                delivery_mode=DeliveryMode.PERSISTENT,
+                content_type="application/json",
+                headers={
+                    "source_job_id": job.get('id'),
+                    "posting_url": job.get('posting_url'),
+                    "scraper_source": job.get('scraper_source', 'unknown')
+                }
+            )
+
+            await exchange.publish(message, routing_key=DETAIL_SCRAPED_JOBS_QUEUE)
+            published_count += 1
+
+            if idx % 50 == 0:
+                logger.info(f"[Detail Scrape Activity] Published {published_count}/{len(jobs)} jobs to queue")
+
+        logger.info(f"[Detail Scrape Activity] ✅ Published {published_count} jobs to {DETAIL_SCRAPED_JOBS_QUEUE} queue")
+
+        return published_count
+
+    except Exception as e:
+        logger.error(f"[Detail Scrape Activity] ❌ Failed to publish jobs to queue: {str(e)}")
+        raise
 
 
 @activity.defn

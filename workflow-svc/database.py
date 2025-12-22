@@ -5,7 +5,13 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://jobgtm:jobgtm_password@localhost:5432/jobgtm")
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,  # Test connections before using them
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=300,  # Recycle connections after 5 minutes
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()

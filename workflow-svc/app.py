@@ -38,10 +38,9 @@ class EnrichmentRequest(BaseModel):
 
 
 class DetailScrapeRequest(BaseModel):
-    batch_size: Optional[int] = 10
-    max_concurrent: Optional[int] = 5
-    skip_already_scraped: Optional[bool] = True
-    limit: Optional[int] = None
+    chunk_size: Optional[int] = 50  # Jobs per child workflow
+    max_concurrent_chunks: Optional[int] = 3  # Parallel child workflows
+    max_concurrent_per_chunk: Optional[int] = 5  # Concurrent scrapes within chunk
 
 class WorkflowResponse(BaseModel):
     workflow_id: str
@@ -253,17 +252,21 @@ async def trigger_detail_scrape_workflow(request: DetailScrapeRequest = DetailSc
     """
     Trigger the detail scraping workflow to scrape full job details from posting URLs.
 
+    Uses a parent-child workflow pattern to avoid Temporal's history event limit:
+    - Parent workflow (coordinator) spawns child workflows for each chunk
+    - Each child workflow processes a small batch of jobs
+    - This allows processing thousands of jobs without hitting event limits
+
     This is Phase 1 of the enrichment pipeline:
-    1. Fetch jobs from job_listings table that haven't been detail-scraped
-    2. For each job, visit the posting URL and scrape full details
-    3. Save scraped details to job_listings_golden table
+    1. Fetch jobs from job_listings table in chunks
+    2. For each chunk, spawn a child workflow to process jobs
+    3. Each child scrapes job details and saves to job_listings_golden table
     4. Mark jobs as ready for AI enrichment (Phase 2)
 
     Args:
-        batch_size: Number of jobs per batch (default: 10)
-        max_concurrent: Maximum concurrent scraping operations (default: 5)
-        skip_already_scraped: Skip jobs already detail-scraped (default: True)
-        limit: Maximum total jobs to process (default: None = all)
+        chunk_size: Jobs per child workflow (default: 50)
+        max_concurrent_chunks: Parallel child workflows (default: 3)
+        max_concurrent_per_chunk: Concurrent scrapes within each chunk (default: 5)
     """
     try:
         logger.info(f"Connecting to Temporal at {TEMPORAL_ADDRESS}")
@@ -271,14 +274,14 @@ async def trigger_detail_scrape_workflow(request: DetailScrapeRequest = DetailSc
         logger.info("Connected to Temporal successfully")
 
         workflow_id = f"detail-scrape-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
-        logger.info(f"Starting detail scrape workflow with ID: {workflow_id}")
-        logger.info(f"Config: batch_size={request.batch_size}, max_concurrent={request.max_concurrent}, limit={request.limit}")
+        logger.info(f"Starting detail scrape coordinator workflow with ID: {workflow_id}")
+        logger.info(f"Config: chunk_size={request.chunk_size}, max_concurrent_chunks={request.max_concurrent_chunks}, max_concurrent_per_chunk={request.max_concurrent_per_chunk}")
 
         handle = await client.start_workflow(
             DetailScrapeWorkflow.run,
             id=workflow_id,
             task_queue=TEMPORAL_TASK_QUEUE,
-            args=[request.batch_size, request.max_concurrent, request.skip_already_scraped, request.limit]
+            args=[request.chunk_size, request.max_concurrent_chunks, request.max_concurrent_per_chunk]
         )
 
         logger.info(f"Detail scrape workflow started: {workflow_id}")

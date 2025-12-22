@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 JOBS_QUEUE = "scraped_jobs"
 JOBS_DLQ = "scraped_jobs_dlq"
 
+# Detail scraping pipeline queue names
+DETAIL_SCRAPED_JOBS_QUEUE = "detail_scraped_jobs"
+DETAIL_SCRAPED_JOBS_DLQ = "detail_scraped_jobs_dlq"
+
 # Enrichment pipeline queue names
 RAW_JOBS_QUEUE = "raw_jobs_for_processing"
 RAW_JOBS_DLQ = "raw_jobs_for_processing_dlq"
@@ -23,6 +27,10 @@ ENRICHED_JOBS_DLQ = "enriched_jobs_dlq"
 # Exchange names
 JOBS_EXCHANGE = "scraped_jobs_exchange"
 DLX_EXCHANGE = "scraped_jobs_dlx"
+
+# Detail scraping exchange names
+DETAIL_SCRAPED_JOBS_EXCHANGE = "detail_scraped_jobs_exchange"
+DETAIL_SCRAPED_JOBS_DLX = "detail_scraped_jobs_dlx"
 
 # Enrichment pipeline exchange names
 RAW_JOBS_EXCHANGE = "raw_jobs_exchange"
@@ -106,6 +114,44 @@ async def setup_queues() -> None:
     )
     await main_queue.bind(exchange, routing_key=JOBS_QUEUE)
     logger.info(f"Declared main queue: {JOBS_QUEUE} with DLX routing")
+
+    # ========== Detail scraping pipeline: detail_scraped_jobs queue ==========
+
+    # Create DLX for detail scraped jobs
+    detail_scraped_jobs_dlx = await channel.declare_exchange(
+        DETAIL_SCRAPED_JOBS_DLX,
+        ExchangeType.DIRECT,
+        durable=True
+    )
+    logger.info(f"Declared DLX exchange: {DETAIL_SCRAPED_JOBS_DLX}")
+
+    # Create DLQ for detail scraped jobs
+    detail_scraped_jobs_dlq = await channel.declare_queue(
+        DETAIL_SCRAPED_JOBS_DLQ,
+        durable=True
+    )
+    await detail_scraped_jobs_dlq.bind(detail_scraped_jobs_dlx, routing_key=DETAIL_SCRAPED_JOBS_QUEUE)
+    logger.info(f"Declared DLQ: {DETAIL_SCRAPED_JOBS_DLQ}")
+
+    # Create main exchange for detail scraped jobs
+    detail_scraped_jobs_exchange = await channel.declare_exchange(
+        DETAIL_SCRAPED_JOBS_EXCHANGE,
+        ExchangeType.DIRECT,
+        durable=True
+    )
+    logger.info(f"Declared exchange: {DETAIL_SCRAPED_JOBS_EXCHANGE}")
+
+    # Create detail scraped jobs queue with DLX configuration
+    detail_scraped_jobs_queue = await channel.declare_queue(
+        DETAIL_SCRAPED_JOBS_QUEUE,
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": DETAIL_SCRAPED_JOBS_DLX,
+            "x-dead-letter-routing-key": DETAIL_SCRAPED_JOBS_QUEUE,
+        }
+    )
+    await detail_scraped_jobs_queue.bind(detail_scraped_jobs_exchange, routing_key=DETAIL_SCRAPED_JOBS_QUEUE)
+    logger.info(f"Declared queue: {DETAIL_SCRAPED_JOBS_QUEUE} with DLX routing")
 
     # ========== Enrichment pipeline: raw_jobs_for_processing queue ==========
 

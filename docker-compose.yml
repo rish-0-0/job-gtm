@@ -90,7 +90,32 @@ services:
       - SCRAPER_URL=http://scraper:6000
       - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
       - RABBITMQ_URL=amqp://jobgtm:jobgtm_password@rabbitmq:5672/
+      - PYTHONUNBUFFERED=1
     restart: unless-stopped
+
+  temporal-worker:
+    build:
+      context: ./workflow-svc
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - SCRAPER_URL=http://scraper:6000
+      - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
+      - RABBITMQ_URL=amqp://jobgtm:jobgtm_password@rabbitmq:5672/
+      - PYTHONUNBUFFERED=1
+    entrypoint: []
+    command: ["python", "worker.py"]
+    restart: unless-stopped
+    deploy:
+      mode: replicated
+      replicas: 2  # Minimum 2 workers for parallel processing
 
   queue-consumer:
     container_name: queue-consumer

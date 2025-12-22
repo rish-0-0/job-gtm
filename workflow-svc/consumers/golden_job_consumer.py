@@ -6,10 +6,15 @@ Stores in job_listings_golden table
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, timezone
 from typing import List
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from sqlalchemy.exc import IntegrityError
 from aio_pika import connect_robust
 from aio_pika.abc import AbstractIncomingMessage
