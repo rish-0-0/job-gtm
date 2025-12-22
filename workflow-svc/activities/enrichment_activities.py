@@ -15,6 +15,104 @@ logger = logging.getLogger(__name__)
 
 
 @activity.defn
+async def get_enrichment_chunk_info(chunk_size: int = 100, skip_already_enriched: bool = True) -> Dict[str, Any]:
+    """
+    Get total count and chunk information for jobs needing enrichment.
+    Returns lightweight metadata only - no job data.
+    """
+    db = SessionLocal()
+    try:
+        logger.info("[Enrichment Activity] Getting chunk info for enrichment jobs...")
+
+        query = db.query(JobListingGolden).filter(
+            JobListingGolden.detail_scrape_status == 'completed'
+        )
+
+        if skip_already_enriched:
+            query = query.filter(
+                (JobListingGolden.enrichment_status == 'pending') |
+                (JobListingGolden.enrichment_status.is_(None))
+            )
+
+        total_count = query.count()
+        chunk_count = (total_count + chunk_size - 1) // chunk_size if total_count > 0 else 0
+
+        chunks = []
+        for i in range(chunk_count):
+            offset = i * chunk_size
+            limit = min(chunk_size, total_count - offset)
+            chunks.append({
+                'chunk_index': i,
+                'offset': offset,
+                'limit': limit
+            })
+
+        logger.info(f"[Enrichment Activity] Found {total_count} jobs, split into {chunk_count} chunks of {chunk_size}")
+
+        return {
+            'total_jobs': total_count,
+            'chunk_size': chunk_size,
+            'chunk_count': chunk_count,
+            'chunks': chunks
+        }
+    finally:
+        db.close()
+
+
+@activity.defn
+async def fetch_enrichment_chunk(offset: int, limit: int, skip_already_enriched: bool = True) -> List[Dict[str, Any]]:
+    """
+    Fetch a specific chunk of jobs for enrichment.
+    Uses offset/limit for pagination to keep response size small.
+    """
+    db = SessionLocal()
+    try:
+        logger.info(f"[Enrichment Activity] Fetching enrichment chunk: offset={offset}, limit={limit}")
+
+        query = db.query(JobListingGolden).filter(
+            JobListingGolden.detail_scrape_status == 'completed'
+        )
+
+        if skip_already_enriched:
+            query = query.filter(
+                (JobListingGolden.enrichment_status == 'pending') |
+                (JobListingGolden.enrichment_status.is_(None))
+            )
+
+        jobs = query.order_by(JobListingGolden.id).offset(offset).limit(limit).all()
+
+        result = []
+        for job in jobs:
+            result.append({
+                'id': job.id,
+                'source_job_id': job.source_job_id,
+                'posting_url': job.posting_url,
+                'company_title': job.company_title,
+                'job_role': job.job_role,
+                'job_location': job.job_location_raw,
+                'employment_type': job.employment_type_raw,
+                'salary_range': job.salary_range_raw,
+                'min_salary': float(job.min_salary_raw) if job.min_salary_raw else None,
+                'max_salary': float(job.max_salary_raw) if job.max_salary_raw else None,
+                'required_experience': job.required_experience,
+                'seniority_level': job.seniority_level_raw,
+                'about_company': job.about_company_raw,
+                'hiring_team': job.hiring_team_raw,
+                'job_description_full': job.job_description_full,
+                'full_page_text': job.full_page_text,
+                'date_posted': job.date_posted,
+                'scraper_source': job.scraper_source,
+                'scraped_at': job.scraped_at.isoformat() if job.scraped_at else None,
+                'detail_scraped_at': job.detail_scraped_at.isoformat() if job.detail_scraped_at else None,
+            })
+
+        logger.info(f"[Enrichment Activity] Fetched {len(result)} jobs for chunk")
+        return result
+    finally:
+        db.close()
+
+
+@activity.defn
 async def fetch_jobs_for_enrichment(skip_already_enriched: bool = True) -> List[Dict[str, Any]]:
     """
     Fetch jobs from job_listings_golden that need AI enrichment.

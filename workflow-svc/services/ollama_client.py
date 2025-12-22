@@ -19,7 +19,13 @@ class OllamaClient:
     def __init__(self, base_url: Optional[str] = None, model: Optional[str] = None):
         self.base_url = base_url or os.getenv("OLLAMA_URL", "http://ollama:11434")
         self.model = model or "llama3.2:3b"
-        self.timeout = 120.0  # 2 minutes timeout for AI generation
+        self.timeout = httpx.Timeout(
+            connect=30.0,    # 30s to establish connection
+            read=300.0,      # 5 minutes to read response (LLM can be slow)
+            write=30.0,      # 30s to send request
+            pool=30.0        # 30s to acquire connection from pool
+        )
+        self.max_retries = 2
 
     async def enrich_job_listing(self, job_data: dict) -> dict:
         """
@@ -177,6 +183,8 @@ IMPORTANT:
         Returns:
             API response dictionary
         """
+        import asyncio
+
         url = f"{self.base_url}/api/generate"
 
         payload = {
@@ -189,29 +197,50 @@ IMPORTANT:
             }
         }
 
-        try:
-            logger.debug(f"[Ollama API] Calling {url} with model {self.model}")
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                result = response.json()
+        last_error = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                logger.debug(f"[Ollama API] Calling {url} with model {self.model} (attempt {attempt}/{self.max_retries})")
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(url, json=payload)
+                    response.raise_for_status()
+                    result = response.json()
 
-                # Log response statistics
-                response_text = result.get('response', '')
-                logger.debug(f"[Ollama API] Response length: {len(response_text)} chars")
-                if 'total_duration' in result:
-                    logger.debug(f"[Ollama API] Total duration: {result['total_duration']/1e9:.2f}s")
+                    # Log response statistics
+                    response_text = result.get('response', '')
+                    logger.debug(f"[Ollama API] Response length: {len(response_text)} chars")
+                    if 'total_duration' in result:
+                        logger.debug(f"[Ollama API] Total duration: {result['total_duration']/1e9:.2f}s")
 
-                return result
-        except httpx.TimeoutException:
-            logger.error(f"[Ollama API] Timeout after {self.timeout}s")
-            raise Exception(f"Ollama API timeout")
-        except httpx.HTTPError as e:
-            logger.error(f"[Ollama API] HTTP error: {str(e)}")
-            raise Exception(f"Ollama API error: {str(e)}")
-        except Exception as e:
-            logger.error(f"[Ollama API] Call failed: {str(e)}", exc_info=True)
-            raise
+                    return result
+
+            except httpx.TimeoutException as e:
+                last_error = e
+                logger.warning(f"[Ollama API] Timeout on attempt {attempt}/{self.max_retries}: {str(e)}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2)  # Wait before retry
+                    continue
+                logger.error(f"[Ollama API] All retries exhausted - timeout")
+                raise Exception(f"Ollama API timeout after {self.max_retries} attempts")
+
+            except httpx.HTTPError as e:
+                last_error = e
+                logger.warning(f"[Ollama API] HTTP error on attempt {attempt}/{self.max_retries}: {str(e)}")
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2)
+                    continue
+                logger.error(f"[Ollama API] All retries exhausted - HTTP error: {str(e)}")
+                raise Exception(f"Ollama API error: {str(e)}")
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"[Ollama API] Call failed on attempt {attempt}: {str(e)}", exc_info=True)
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2)
+                    continue
+                raise
+
+        raise Exception(f"Ollama API failed after {self.max_retries} attempts: {str(last_error)}")
 
     def _parse_enrichment_response(self, response: dict) -> dict:
         """

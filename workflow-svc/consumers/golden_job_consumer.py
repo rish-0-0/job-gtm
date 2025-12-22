@@ -15,7 +15,6 @@ from typing import List
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy.exc import IntegrityError
 from aio_pika import connect_robust
 from aio_pika.abc import AbstractIncomingMessage
 
@@ -90,13 +89,12 @@ class GoldenJobConsumer:
     async def _process_batch(self, messages: List[AbstractIncomingMessage]):
         """
         Process batch of enriched jobs:
-        1. Parse enriched data
-        2. Map to JobListingGolden model
-        3. Bulk insert with duplicate handling
+        Jobs already exist in golden table from detail scraping phase.
+        We just need to UPDATE them with AI enrichment results.
         """
         db = SessionLocal()
-        inserted_count = 0
         updated_count = 0
+        not_found_count = 0
         failed_count = 0
 
         try:
@@ -104,27 +102,33 @@ class GoldenJobConsumer:
                 try:
                     enriched_data = json.loads(message.body.decode())
                     posting_url = enriched_data.get('posting_url', 'unknown')
+                    golden_id = enriched_data.get('id')  # This is the golden table ID
 
-                    logger.debug(f"[Golden Consumer] Processing job: {posting_url}")
+                    logger.debug(f"[Golden Consumer] Processing job: {posting_url} (id={golden_id})")
 
-                    # Map to golden model
-                    golden_job = self._map_to_golden_model(enriched_data)
+                    # Find existing record by ID or posting_url
+                    existing = None
+                    if golden_id:
+                        existing = db.query(JobListingGolden).filter(
+                            JobListingGolden.id == golden_id
+                        ).first()
 
-                    try:
-                        db.add(golden_job)
-                        db.flush()
-                        inserted_count += 1
-                        await message.ack()
-                        logger.info(f"[Golden Consumer] ✅ Inserted new job: {posting_url}")
+                    if not existing:
+                        existing = db.query(JobListingGolden).filter(
+                            JobListingGolden.posting_url == posting_url
+                        ).first()
 
-                    except IntegrityError:
-                        # Duplicate posting_url - update existing record
-                        db.rollback()
-                        logger.debug(f"[Golden Consumer] Duplicate detected, updating: {posting_url}")
-                        await self._update_existing(db, enriched_data)
+                    if existing:
+                        # Update with AI enrichment data
+                        self._update_with_enrichment(existing, enriched_data)
+                        db.commit()
                         updated_count += 1
                         await message.ack()
-                        logger.info(f"[Golden Consumer] 🔄 Updated existing job: {posting_url}")
+                        logger.info(f"[Golden Consumer] ✅ Updated job with AI enrichment: {posting_url}")
+                    else:
+                        logger.warning(f"[Golden Consumer] ⚠️ Job not found in golden table: {posting_url}")
+                        not_found_count += 1
+                        await message.ack()  # Ack anyway - job doesn't exist
 
                 except Exception as e:
                     db.rollback()
@@ -135,11 +139,9 @@ class GoldenJobConsumer:
                     await self._handle_failed_message(message, str(e))
                     failed_count += 1
 
-            db.commit()
-
             logger.info(
                 f"[Golden Consumer] 📊 Batch results: "
-                f"✅ {inserted_count} inserted, 🔄 {updated_count} updated, ❌ {failed_count} failed"
+                f"✅ {updated_count} updated, ⚠️ {not_found_count} not found, ❌ {failed_count} failed"
             )
 
         except Exception as e:
@@ -162,146 +164,102 @@ class GoldenJobConsumer:
             logger.warning(f"Could not parse datetime: {dt_string}")
             return None
 
-    def _map_to_golden_model(self, enriched_data: dict) -> JobListingGolden:
+    def _update_with_enrichment(self, existing: JobListingGolden, enriched_data: dict):
         """
-        Map enriched JSON data to JobListingGolden model
-        Extract nested AI enrichment fields
+        Update existing golden record with AI enrichment data.
+        Only updates enrichment-related fields, preserves original scraped data.
         """
         ai = enriched_data.get('ai_enrichment', {})
         metadata = ai.get('_metadata', {})
 
-        # Extract currency normalization
+        # Extract AI enrichment fields
         currency_norm = ai.get('currency_normalization', {})
-
-        # Extract seniority level
         seniority = ai.get('seniority_level', {})
-
-        # Extract work arrangement
         work_arr = ai.get('work_arrangement', {})
-
-        # Extract scam detection
         scam = ai.get('scam_detection', {})
-
-        # Extract location normalization
         location = ai.get('location_normalization', {})
-
-        # Extract company insights
         company = ai.get('company_insights', {})
-
-        # Extract benefits
         benefits = ai.get('benefits', {})
-
-        # Extract role classification
         role = ai.get('role_classification', {})
 
-        return JobListingGolden(
-            source_job_id=enriched_data.get('id'),
-            posting_url=enriched_data['posting_url'],
+        # Update normalized/enriched fields only
+        # Location normalization
+        if location:
+            city = location.get('city', '')
+            country = location.get('country', '')
+            if city or country:
+                existing.job_location_normalized = f"{city}, {country}".strip(', ')
+            existing.location_city = location.get('city')
+            existing.location_state = location.get('state')
+            existing.location_country = location.get('country')
+            existing.location_timezone = location.get('timezone')
+            if location.get('is_remote') is not None:
+                existing.is_remote = location.get('is_remote')
 
-            # Core fields
-            company_title=enriched_data.get('company_title'),
-            job_role=enriched_data.get('job_role'),
-            job_location_raw=enriched_data.get('job_location'),
-            job_location_normalized=f"{location.get('city', '')}, {location.get('country', '')}".strip(', '),
-            employment_type_raw=enriched_data.get('employment_type'),
-            employment_type_normalized=enriched_data.get('employment_type'),
+        # Salary normalization
+        if currency_norm:
+            existing.currency_raw = currency_norm.get('detected_currency')
+            existing.min_salary_usd = currency_norm.get('min_salary_usd')
+            existing.max_salary_usd = currency_norm.get('max_salary_usd')
+            existing.currency_conversion_rate = currency_norm.get('conversion_rate')
+            if currency_norm.get('conversion_rate'):
+                existing.currency_conversion_date = datetime.now(timezone.utc)
 
-            # Salary normalization
-            salary_range_raw=enriched_data.get('salary_range'),
-            min_salary_raw=enriched_data.get('min_salary'),
-            max_salary_raw=enriched_data.get('max_salary'),
-            currency_raw=currency_norm.get('detected_currency'),
-            min_salary_usd=currency_norm.get('min_salary_usd'),
-            max_salary_usd=currency_norm.get('max_salary_usd'),
-            currency_conversion_rate=currency_norm.get('conversion_rate'),
-            currency_conversion_date=datetime.now(timezone.utc) if currency_norm.get('conversion_rate') else None,
+        # Seniority normalization
+        if seniority:
+            existing.seniority_level_normalized = seniority.get('normalized')
+            existing.seniority_confidence_score = seniority.get('confidence')
 
-            # Experience and seniority
-            required_experience=enriched_data.get('required_experience'),
-            seniority_level_raw=enriched_data.get('seniority_level'),
-            seniority_level_normalized=seniority.get('normalized'),
-            seniority_confidence_score=seniority.get('confidence'),
+        # Work arrangement
+        if work_arr:
+            existing.work_arrangement_raw = work_arr.get('details')
+            existing.work_arrangement_normalized = work_arr.get('normalized')
 
-            # Work arrangement
-            work_arrangement_raw=work_arr.get('details'),
-            work_arrangement_normalized=work_arr.get('normalized'),
+        # Scam detection
+        if scam:
+            existing.scam_score = scam.get('score')
+            existing.scam_indicators = scam.get('indicators')
 
-            # Scam detection
-            scam_score=scam.get('score'),
-            scam_indicators=scam.get('indicators'),
+        # Skills extraction
+        skills = ai.get('skills_extraction', {})
+        if skills:
+            existing.skills_extracted = skills.get('skills')
 
-            # Skills
-            skills_extracted=ai.get('skills_extraction', {}).get('skills'),
-            tech_stack_normalized=ai.get('tech_stack', {}).get('technologies'),
+        tech_stack = ai.get('tech_stack', {})
+        if tech_stack:
+            existing.tech_stack_normalized = tech_stack.get('technologies')
 
-            # Location details
-            location_city=location.get('city'),
-            location_state=location.get('state'),
-            location_country=location.get('country'),
-            location_timezone=location.get('timezone'),
-            is_remote=location.get('is_remote'),
+        # Company insights
+        if company:
+            existing.company_research = company.get('notable_info')
+            existing.company_industry = company.get('industry')
+            existing.company_size = company.get('company_size')
 
-            # Company enrichment
-            about_company_raw=enriched_data.get('about_company'),
-            company_research=company.get('notable_info'),
-            company_industry=company.get('industry'),
-            company_size=company.get('company_size'),
+        # Benefits
+        if benefits:
+            existing.has_stock_options = benefits.get('has_stock_options')
+            existing.stock_options_details = benefits.get('stock_details')
+            existing.other_benefits = benefits.get('other_benefits')
 
-            # Hiring team
-            hiring_team_raw=enriched_data.get('hiring_team'),
-            hiring_team_analysis=None,  # Could be added later
+        # Role classification
+        if role:
+            existing.primary_role = role.get('primary_role')
+            existing.role_category = role.get('role_category')
+            existing.is_management = role.get('is_management')
 
-            # Benefits
-            has_stock_options=benefits.get('has_stock_options'),
-            stock_options_details=benefits.get('stock_details'),
-            other_benefits=benefits.get('other_benefits'),
+        # Processing metadata
+        existing.enriched_at = self._parse_datetime(enriched_data.get('enriched_at')) or datetime.now(timezone.utc)
+        existing.ollama_model_version = metadata.get('model', 'llama3.2:3b')
+        existing.processing_duration_ms = enriched_data.get('processing_duration_ms')
+        existing.enrichment_status = enriched_data.get('enrichment_status', 'completed')
 
-            # Full job details
-            job_description_full=enriched_data.get('job_description_full', enriched_data.get('job_description')),
-            job_requirements=enriched_data.get('job_requirements'),
-            job_benefits=enriched_data.get('job_benefits'),
+        # Store error if present
+        if 'error' in ai:
+            existing.enrichment_errors = ai.get('error')
 
-            # Role classification
-            primary_role=role.get('primary_role'),
-            role_category=role.get('role_category'),
-            is_management=role.get('is_management'),
-
-            # Additional metadata from raw job_listing
-            date_posted=enriched_data.get('date_posted'),
-            scraper_source=enriched_data.get('scraper_source'),
-            scraped_at=self._parse_datetime(enriched_data.get('scraped_at')),
-
-            # Processing metadata
-            enriched_at=self._parse_datetime(enriched_data.get('enriched_at')) or datetime.now(timezone.utc),
-            ollama_model_version=metadata.get('model', 'llama3.2:3b'),
-            processing_duration_ms=enriched_data.get('processing_duration_ms'),
-            ai_prompt_tokens=None,  # Could be extracted if available
-            ai_response_tokens=None,
-            enrichment_status=enriched_data.get('enrichment_status', 'completed'),
-            enrichment_errors=ai.get('error') if 'error' in ai else None,
-        )
-
-    async def _update_existing(self, db, enriched_data: dict):
-        """Update existing record with latest enrichment"""
-        posting_url = enriched_data['posting_url']
-
-        existing = db.query(JobListingGolden).filter(
-            JobListingGolden.posting_url == posting_url
-        ).first()
-
-        if existing:
-            # Update with new enrichment data
-            golden_job = self._map_to_golden_model(enriched_data)
-
-            # Update fields (excluding id and created_at)
-            for key, value in vars(golden_job).items():
-                if key not in ['_sa_instance_state', 'id', 'created_at']:
-                    setattr(existing, key, value)
-
-            existing.updated_at = datetime.now(timezone.utc)
-            existing.enrichment_version = (existing.enrichment_version or 0) + 1
-
-            db.commit()
+        # Update metadata
+        existing.updated_at = datetime.now(timezone.utc)
+        existing.enrichment_version = (existing.enrichment_version or 0) + 1
 
     async def _handle_failed_message(self, message: AbstractIncomingMessage, error: str):
         """Handle failed message with retry logic"""

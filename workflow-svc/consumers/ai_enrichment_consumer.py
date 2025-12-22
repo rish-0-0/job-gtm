@@ -16,7 +16,6 @@ from typing import List
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import httpx
 from aio_pika import connect_robust, Message, DeliveryMode
 from aio_pika.abc import AbstractIncomingMessage
 
@@ -26,7 +25,7 @@ from queue_config import (
 )
 from const import (
     ENRICHMENT_BATCH_SIZE, ENRICHMENT_BATCH_TIMEOUT,
-    PUPPETEER_RATE_LIMIT, OLLAMA_RATE_LIMIT, ENRICHMENT_MAX_RETRIES
+    OLLAMA_RATE_LIMIT, ENRICHMENT_MAX_RETRIES
 )
 from services.ollama_client import OllamaClient
 
@@ -45,14 +44,12 @@ class AIEnrichmentConsumer:
 
     def __init__(self):
         self.ollama_client = OllamaClient()
-        self.scraper_url = os.getenv("SCRAPER_URL", "http://scraper:6000")
         self.running = False
         self.message_batch: List[AbstractIncomingMessage] = []
         self.batch_lock = asyncio.Lock()
         self.batch_event = asyncio.Event()
 
-        # Rate limiters
-        self.puppeteer_semaphore = asyncio.Semaphore(PUPPETEER_RATE_LIMIT)
+        # Rate limiter for Ollama (no need for puppeteer - data already scraped)
         self.ollama_semaphore = asyncio.Semaphore(OLLAMA_RATE_LIMIT)
 
     async def process_message(self, message: AbstractIncomingMessage):
@@ -121,11 +118,13 @@ class AIEnrichmentConsumer:
     async def _enrich_single_job(self, message: AbstractIncomingMessage) -> bool:
         """
         Enrich a single job listing:
-        1. Parse message to get job data
-        2. Deep scrape job URL (with rate limiting)
-        3. Call Ollama for AI enrichment (with rate limiting)
-        4. Publish enriched result
-        5. Ack/nack message
+        1. Parse message to get job data (already contains full details from golden table)
+        2. Call Ollama for AI enrichment (with rate limiting)
+        3. Publish enriched result
+        4. Ack/nack message
+
+        Note: Jobs come from golden table with job_description_full and full_page_text
+        already populated from detail scraping phase. No need to scrape again.
         """
         try:
             start_time = datetime.now(timezone.utc)
@@ -136,29 +135,10 @@ class AIEnrichmentConsumer:
                 f"{job_data.get('job_role')}"
             )
 
-            # Step 1: Deep scrape (with rate limiting)
-            full_details = {}
-            scrape_start = datetime.now(timezone.utc)
-            try:
-                logger.debug(f"[AI Consumer] Acquiring Puppeteer semaphore for {job_data['posting_url']}")
-                async with self.puppeteer_semaphore:
-                    logger.info(f"[AI Consumer] Starting deep scrape for {job_data['posting_url']}")
-                    full_details = await self._deep_scrape_job(
-                        job_data['posting_url']
-                    )
-                    scrape_duration = (datetime.now(timezone.utc) - scrape_start).total_seconds()
-                    logger.info(f"[AI Consumer] Deep scrape completed in {scrape_duration:.2f}s for {job_data['posting_url']}")
-            except Exception as e:
-                logger.warning(
-                    f"[AI Consumer] Deep scrape failed for {job_data['posting_url']}: {str(e)}"
-                )
-                # Continue with partial data
+            # Job data already contains full details from golden table (detail scraping phase)
+            # No need to deep scrape again - just use the data we have
 
-            # Merge details
-            enriched_data = {**job_data, **full_details}
-            logger.debug(f"[AI Consumer] Merged job data with scrape details for {job_data['posting_url']}")
-
-            # Step 2: AI enrichment (with rate limiting)
+            # AI enrichment (with rate limiting) - use job_data directly from golden table
             ai_enrichment = {}
             ai_start = datetime.now(timezone.utc)
             try:
@@ -166,7 +146,7 @@ class AIEnrichmentConsumer:
                 async with self.ollama_semaphore:
                     logger.info(f"[AI Consumer] Starting AI enrichment for {job_data['posting_url']}")
                     ai_enrichment = await self.ollama_client.enrich_job_listing(
-                        enriched_data
+                        job_data  # Use job_data directly - already has full details from golden table
                     )
                     ai_duration = (datetime.now(timezone.utc) - ai_start).total_seconds()
                     logger.info(f"[AI Consumer] AI enrichment completed in {ai_duration:.2f}s for {job_data['posting_url']}")
@@ -176,13 +156,13 @@ class AIEnrichmentConsumer:
                 )
                 ai_enrichment = {"error": str(e)}
 
-            # Step 3: Combine all data
+            # Combine job data with AI enrichment results
             end_time = datetime.now(timezone.utc)
             total_duration = int((end_time - start_time).total_seconds() * 1000)
             enrichment_status = 'completed' if 'error' not in ai_enrichment else 'partial'
 
             final_data = {
-                **enriched_data,
+                **job_data,  # Original data from golden table
                 'ai_enrichment': ai_enrichment,
                 'enriched_at': end_time.isoformat(),
                 'enrichment_status': enrichment_status,
@@ -211,21 +191,6 @@ class AIEnrichmentConsumer:
             )
             await self._handle_failed_message(message, str(e))
             return False
-
-    async def _deep_scrape_job(self, url: str) -> dict:
-        """Call scraper service to get full job details"""
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    f"{self.scraper_url}/scrape/details",
-                    json={"url": url}
-                )
-                response.raise_for_status()
-                result = response.json()
-                return result if result.get('success') else {}
-        except Exception as e:
-            logger.warning(f"Scraper service call failed: {str(e)}")
-            return {}
 
     async def _publish_to_enriched_queue(self, data: dict):
         """Publish enriched job to enriched_jobs queue"""
