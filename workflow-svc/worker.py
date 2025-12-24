@@ -21,7 +21,7 @@ from activities.queue_activities import (
 )
 from activities.enrichment_activities import (
     get_enrichment_chunk_info,
-    fetch_enrichment_chunk,
+    fetch_and_publish_enrichment_chunk,
     fetch_jobs_for_enrichment,
     publish_to_raw_jobs_queue,
 )
@@ -87,7 +87,7 @@ async def main():
             publish_scrape_results,
             # Enrichment activities
             get_enrichment_chunk_info,
-            fetch_enrichment_chunk,
+            fetch_and_publish_enrichment_chunk,
             fetch_jobs_for_enrichment,
             publish_to_raw_jobs_queue,
             # Detail scrape activities

@@ -135,6 +135,17 @@ class AIEnrichmentConsumer:
                 f"{job_data.get('job_role')}"
             )
 
+            # Debug: Log what data we have for enrichment
+            job_desc_len = len(job_data.get('job_description_full') or '')
+            full_text_len = len(job_data.get('full_page_text') or '')
+            logger.info(
+                f"[AI Consumer] Job data received - "
+                f"job_description_full: {job_desc_len} chars, "
+                f"full_page_text: {full_text_len} chars, "
+                f"location: {job_data.get('job_location_raw') or job_data.get('job_location')}, "
+                f"salary: {job_data.get('salary_range_raw') or job_data.get('salary_range')}"
+            )
+
             # Job data already contains full details from golden table (detail scraping phase)
             # No need to deep scrape again - just use the data we have
 

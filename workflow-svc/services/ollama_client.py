@@ -45,7 +45,11 @@ class OllamaClient:
 
             # Build enrichment prompt
             prompt = self._build_enrichment_prompt(job_data)
-            logger.debug(f"[Ollama] Built prompt for {posting_url}, length: {len(prompt)} chars")
+            logger.info(f"[Ollama] Built prompt for {posting_url}, length: {len(prompt)} chars")
+
+            # Log what data we're working with
+            job_desc = job_data.get('job_description_full') or job_data.get('full_page_text') or job_data.get('job_description')
+            logger.info(f"[Ollama] Job description length: {len(job_desc) if job_desc else 0} chars")
 
             # Call Ollama API
             logger.debug(f"[Ollama] Calling Ollama API for {posting_url}")
@@ -55,22 +59,29 @@ class OllamaClient:
             # Parse response
             enriched_data = self._parse_enrichment_response(response)
 
+            # Extract token counts from response
+            prompt_tokens = response.get('prompt_eval_count', 0)
+            response_tokens = response.get('eval_count', 0)
+
             # Check for errors in response
             if "error" in enriched_data:
                 logger.warning(f"[Ollama] Enrichment returned error for {posting_url}: {enriched_data.get('error')}")
             else:
                 logger.info(f"[Ollama] Successfully enriched {posting_url}")
 
-            # Add processing metadata
+            # Add processing metadata including token usage
             end_time = datetime.now(timezone.utc)
             duration_ms = int((end_time - start_time).total_seconds() * 1000)
             enriched_data["_metadata"] = {
                 "processing_duration_ms": duration_ms,
                 "model": self.model,
-                "timestamp": end_time.isoformat()
+                "timestamp": end_time.isoformat(),
+                "prompt_tokens": prompt_tokens,
+                "response_tokens": response_tokens,
+                "total_tokens": prompt_tokens + response_tokens
             }
 
-            logger.info(f"[Ollama] Total enrichment time for {posting_url}: {duration_ms}ms")
+            logger.info(f"[Ollama] Total enrichment time for {posting_url}: {duration_ms}ms, tokens: {prompt_tokens}+{response_tokens}={prompt_tokens+response_tokens}")
 
             return enriched_data
 
@@ -88,89 +99,150 @@ class OllamaClient:
         Returns:
             Formatted prompt string
         """
-        prompt = f"""You are a job listing analysis expert. Analyze the following job listing and provide structured enrichment data.
+        # Get the full job description - prefer detailed version from golden table
+        job_description = (
+            job_data.get('job_description_full') or
+            job_data.get('full_page_text') or
+            job_data.get('job_description') or
+            'N/A'
+        )
+        # Truncate if too long but keep more context
+        if len(job_description) > 3000:
+            job_description = job_description[:3000] + "..."
 
-Job Listing:
-Company: {job_data.get('company_title', 'N/A')}
-Role: {job_data.get('job_role', 'N/A')}
-Location: {job_data.get('job_location', 'N/A')}
-Salary: {job_data.get('salary_range', 'N/A')}
-Description: {job_data.get('job_description', 'N/A')[:1000]}...
-Employment Type: {job_data.get('employment_type', 'N/A')}
-Posted: {job_data.get('date_posted', 'N/A')}
-About Company: {job_data.get('about_company', 'N/A')[:500]}
+        about_company = job_data.get('about_company') or job_data.get('about_company_raw') or 'N/A'
+        if len(about_company) > 1000:
+            about_company = about_company[:1000] + "..."
 
-Please provide the following analysis in JSON format:
+        prompt = f"""You are a job listing analysis expert. Analyze the following job listing THOROUGHLY and extract ALL available information. You MUST provide a value for EVERY field - use "N/A" for strings or 0 for numbers if information is not available.
+
+=== JOB LISTING DATA ===
+Company: {job_data.get('company_title') or 'N/A'}
+Job Title/Role: {job_data.get('job_role') or 'N/A'}
+Location (Raw): {job_data.get('job_location') or job_data.get('job_location_raw') or 'N/A'}
+Salary Range: {job_data.get('salary_range') or job_data.get('salary_range_raw') or 'N/A'}
+Min Salary: {job_data.get('min_salary') or job_data.get('min_salary_raw') or 'N/A'}
+Max Salary: {job_data.get('max_salary') or job_data.get('max_salary_raw') or 'N/A'}
+Employment Type: {job_data.get('employment_type') or job_data.get('employment_type_raw') or 'N/A'}
+Experience Required: {job_data.get('required_experience') or 'N/A'}
+Seniority Level (Raw): {job_data.get('seniority_level') or job_data.get('seniority_level_raw') or 'N/A'}
+Date Posted: {job_data.get('date_posted') or 'N/A'}
+
+About Company:
+{about_company}
+
+Full Job Description:
+{job_description}
+
+=== ANALYSIS INSTRUCTIONS ===
+Analyze the job listing above and provide COMPLETE structured data. DO NOT leave fields empty or null.
+
+CRITICAL RULES:
+1. EVERY string field MUST have a value - use "N/A" if information is not available
+2. EVERY number field MUST have a value - use 0 if not available
+3. EVERY boolean field MUST be true or false - make your best inference
+4. EVERY array field MUST have at least one item - use ["N/A"] if nothing found
+5. Extract ALL skills, technologies, and requirements mentioned in the description
+6. Infer seniority from job title, requirements, and experience needed
+7. Infer work arrangement from location, description, and any remote/hybrid mentions
+8. Look for salary clues even if not explicitly stated (e.g., "competitive", market rates)
+
+Return this EXACT JSON structure with ALL fields populated:
 
 {{
   "currency_normalization": {{
-    "detected_currency": "USD|EUR|GBP|INR|etc",
-    "min_salary_usd": <number or null>,
-    "max_salary_usd": <number or null>,
-    "conversion_rate": <number>,
+    "detected_currency": "<USD|EUR|GBP|INR|CAD|AUD|SGD|N/A>",
+    "min_salary_usd": <number or 0 if unknown>,
+    "max_salary_usd": <number or 0 if unknown>,
+    "conversion_rate": <number or 1.0>,
     "confidence": <0.0-1.0>
   }},
   "seniority_level": {{
-    "normalized": "Entry|Junior|Mid|Senior|Lead|Principal|Staff|Executive",
+    "normalized": "<Entry|Junior|Mid|Senior|Lead|Principal|Staff|Executive|N/A>",
     "confidence": <0.0-1.0>,
-    "reasoning": "<brief explanation>"
+    "reasoning": "<explain how you determined seniority - REQUIRED>"
   }},
   "work_arrangement": {{
-    "normalized": "On-site|Remote|Hybrid",
+    "normalized": "<On-site|Remote|Hybrid|N/A>",
     "confidence": <0.0-1.0>,
-    "details": "<any specific details>"
+    "details": "<explain work arrangement details - REQUIRED>"
   }},
   "scam_detection": {{
-    "score": <0-100>,
-    "indicators": ["list", "of", "red", "flags"],
+    "score": <0-100, 0=legitimate, 100=definite scam>,
+    "indicators": ["<list any red flags, or 'None detected'>"],
     "is_likely_scam": <true|false>,
-    "reasoning": "<explanation>"
+    "reasoning": "<explain your scam assessment - REQUIRED>"
   }},
   "skills_extraction": {{
     "skills": [
-      {{"skill": "React", "normalized": "ReactJS", "category": "Frontend", "experience": "3+ years"}},
-      {{"skill": "Node", "normalized": "Node.js", "category": "Backend", "experience": "2+ years"}}
+      {{"skill": "<raw skill>", "normalized": "<standardized name>", "category": "<Frontend|Backend|Database|DevOps|Cloud|Mobile|AI/ML|Data|Security|Management|Soft Skills|Other>", "experience": "<years or N/A>"}}
     ]
   }},
   "tech_stack": {{
-    "technologies": ["React", "Node.js", "PostgreSQL"],
-    "frameworks": ["Next.js", "Express"],
-    "tools": ["Docker", "Git"]
+    "technologies": ["<list all technologies, frameworks, languages mentioned>"],
+    "frameworks": ["<specific frameworks>"],
+    "tools": ["<tools, platforms, services>"],
+    "databases": ["<any databases mentioned>"],
+    "cloud": ["<cloud platforms: AWS, GCP, Azure, etc.>"]
   }},
   "location_normalization": {{
-    "city": "<city>",
-    "state": "<state>",
-    "country": "<country>",
-    "timezone": "<timezone>",
-    "is_remote": <true|false>
+    "city": "<city name or N/A>",
+    "state": "<state/province or N/A>",
+    "country": "<country name or N/A>",
+    "timezone": "<timezone like UTC+5:30, PST, EST or N/A>",
+    "is_remote": <true|false>,
+    "location_type": "<Single Location|Multiple Locations|Global|N/A>"
   }},
   "company_insights": {{
-    "industry": "<industry>",
-    "company_size": "<size estimate>",
-    "funding_stage": "<if mentioned>",
-    "notable_info": "<any interesting facts>"
+    "industry": "<Technology|Finance|Healthcare|E-commerce|Education|Manufacturing|Consulting|Other>",
+    "company_size": "<Startup (1-50)|Small (51-200)|Medium (201-1000)|Large (1001-5000)|Enterprise (5000+)|N/A>",
+    "funding_stage": "<Seed|Series A|Series B|Series C+|Public|Bootstrapped|N/A>",
+    "notable_info": "<any interesting company facts, culture, mission - REQUIRED>"
   }},
   "benefits": {{
     "has_stock_options": <true|false>,
-    "stock_details": "<equity details if mentioned>",
-    "other_benefits": ["benefit1", "benefit2"]
+    "stock_details": "<equity/RSU details or N/A>",
+    "has_health_insurance": <true|false>,
+    "has_retirement_plan": <true|false>,
+    "has_flexible_hours": <true|false>,
+    "has_learning_budget": <true|false>,
+    "pto_days": <number or 0>,
+    "other_benefits": ["<list all other benefits mentioned>"]
   }},
   "role_classification": {{
-    "primary_role": "Software Engineer|Data Scientist|etc",
-    "role_category": "Engineering|Product|etc",
-    "is_management": <true|false>
+    "primary_role": "<Software Engineer|Frontend Developer|Backend Developer|Full Stack Developer|DevOps Engineer|Data Scientist|Data Engineer|ML Engineer|Product Manager|Engineering Manager|QA Engineer|Security Engineer|Mobile Developer|Cloud Engineer|Other>",
+    "role_category": "<Engineering|Product|Design|Data|Management|Operations|Security|Other>",
+    "is_management": <true|false>,
+    "team_size": "<number of reports if management, else 0>",
+    "department": "<Engineering|Product|Data|Infrastructure|Security|Other|N/A>"
+  }},
+  "job_quality_score": {{
+    "overall_score": <1-10>,
+    "description_quality": <1-10>,
+    "salary_transparency": <1-10>,
+    "requirements_clarity": <1-10>
   }}
 }}
 
-IMPORTANT:
-- Return ONLY valid JSON, no additional text or markdown
-- Use null for missing/unknown values
-- Be conservative with confidence scores
-- Scam indicators: unrealistic salary, vague company info, suspicious contact methods, too-good-to-be-true promises, grammar errors
-- Normalize similar technologies (ReactJS=React, NodeJS=Node.js, Postgres=PostgreSQL, JS=JavaScript, TS=TypeScript)
-- For currencies: Use current approximate exchange rates (INR≈0.012 USD, EUR≈1.08 USD, GBP≈1.27 USD)
-- Tech stack normalization is critical - group similar items together
-"""
+CURRENCY CONVERSION RATES (approximate):
+- INR to USD: 0.012
+- EUR to USD: 1.08
+- GBP to USD: 1.27
+- CAD to USD: 0.74
+- AUD to USD: 0.65
+- SGD to USD: 0.74
+
+TECHNOLOGY NORMALIZATION:
+- ReactJS, React.js → React
+- NodeJS, Node → Node.js
+- Postgres, PostgresSQL → PostgreSQL
+- JS → JavaScript
+- TS → TypeScript
+- K8s → Kubernetes
+- AWS, Amazon Web Services → AWS
+- GCP, Google Cloud → Google Cloud Platform
+
+Return ONLY the JSON object, no markdown code blocks, no explanations before or after."""
         return prompt
 
     async def _call_ollama(self, prompt: str) -> dict:
@@ -192,8 +264,8 @@ IMPORTANT:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.3,  # Lower temperature for more consistent JSON output
-                "num_predict": 2048,  # Max tokens to generate
+                "temperature": 0.2,  # Lower temperature for more consistent JSON output
+                "num_predict": 4096,  # Max tokens to generate (increased for detailed response)
             }
         }
 
@@ -206,11 +278,15 @@ IMPORTANT:
                     response.raise_for_status()
                     result = response.json()
 
-                    # Log response statistics
-                    response_text = result.get('response', '')
-                    logger.debug(f"[Ollama API] Response length: {len(response_text)} chars")
-                    if 'total_duration' in result:
-                        logger.debug(f"[Ollama API] Total duration: {result['total_duration']/1e9:.2f}s")
+                    # Log response statistics including token usage
+                    prompt_tokens = result.get('prompt_eval_count', 0)
+                    response_tokens = result.get('eval_count', 0)
+                    total_duration_s = result.get('total_duration', 0) / 1e9
+
+                    logger.info(
+                        f"[Ollama API] Completed: {prompt_tokens} prompt tokens, "
+                        f"{response_tokens} response tokens, {total_duration_s:.1f}s"
+                    )
 
                     return result
 

@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from aio_pika import connect_robust
 from aio_pika.abc import AbstractIncomingMessage
 
+from sqlalchemy.sql import func
+
 from database import SessionLocal
 from models import JobListingGolden
 from queue_config import RABBITMQ_URL, ENRICHED_JOBS_QUEUE, ENRICHED_JOBS_DLQ
@@ -90,7 +92,7 @@ class GoldenJobConsumer:
         """
         Process batch of enriched jobs:
         Jobs already exist in golden table from detail scraping phase.
-        We just need to UPDATE them with AI enrichment results.
+        We just need to UPDATE them with AI enrichment results using direct UPDATE by ID.
         """
         db = SessionLocal()
         updated_count = 0
@@ -104,31 +106,30 @@ class GoldenJobConsumer:
                     posting_url = enriched_data.get('posting_url', 'unknown')
                     golden_id = enriched_data.get('id')  # This is the golden table ID
 
-                    logger.debug(f"[Golden Consumer] Processing job: {posting_url} (id={golden_id})")
+                    if not golden_id:
+                        logger.warning(f"[Golden Consumer] ⚠️ No ID in message, skipping: {posting_url}")
+                        await message.ack()
+                        not_found_count += 1
+                        continue
 
-                    # Find existing record by ID or posting_url
-                    existing = None
-                    if golden_id:
-                        existing = db.query(JobListingGolden).filter(
-                            JobListingGolden.id == golden_id
-                        ).first()
+                    # Build update dict from enrichment data
+                    update_values = self._build_update_dict(enriched_data)
 
-                    if not existing:
-                        existing = db.query(JobListingGolden).filter(
-                            JobListingGolden.posting_url == posting_url
-                        ).first()
+                    # Direct UPDATE by ID - no SELECT needed
+                    result = db.query(JobListingGolden).filter(
+                        JobListingGolden.id == golden_id
+                    ).update(update_values, synchronize_session=False)
 
-                    if existing:
-                        # Update with AI enrichment data
-                        self._update_with_enrichment(existing, enriched_data)
-                        db.commit()
+                    db.commit()
+
+                    if result > 0:
                         updated_count += 1
                         await message.ack()
-                        logger.info(f"[Golden Consumer] ✅ Updated job with AI enrichment: {posting_url}")
+                        logger.info(f"[Golden Consumer] ✅ Updated job id={golden_id}: {posting_url}")
                     else:
-                        logger.warning(f"[Golden Consumer] ⚠️ Job not found in golden table: {posting_url}")
                         not_found_count += 1
                         await message.ack()  # Ack anyway - job doesn't exist
+                        logger.warning(f"[Golden Consumer] ⚠️ Job not found id={golden_id}: {posting_url}")
 
                 except Exception as e:
                     db.rollback()
@@ -164,10 +165,67 @@ class GoldenJobConsumer:
             logger.warning(f"Could not parse datetime: {dt_string}")
             return None
 
-    def _update_with_enrichment(self, existing: JobListingGolden, enriched_data: dict):
+    def _truncate(self, value: str, max_length: int) -> str:
+        """Truncate string to max length, handling None and N/A"""
+        if value is None:
+            return None
+        value = str(value).strip()
+        # Keep N/A as a valid value instead of converting to None
+        if len(value) > max_length:
+            return value[:max_length]
+        return value
+
+    def _clean_na(self, value: str) -> str:
+        """Convert N/A to None for optional fields, otherwise return value"""
+        if value is None:
+            return None
+        value = str(value).strip()
+        if value.upper() in ('N/A', 'NA', 'NONE', 'NULL', ''):
+            return None
+        return value
+
+    def _sanitize_currency(self, currency: str) -> str:
+        """Extract first currency code from potentially malformed LLM output"""
+        if not currency:
+            return None
+        # LLM might return "INR|USD|EUR" - just take the first one
+        currency = str(currency).strip()
+        if currency.upper() in ('N/A', 'NA', 'NONE', 'NULL'):
+            return None
+        if '|' in currency:
+            currency = currency.split('|')[0].strip()
+        if '/' in currency:
+            currency = currency.split('/')[0].strip()
+        if ',' in currency:
+            currency = currency.split(',')[0].strip()
+        return currency[:10] if currency else None
+
+    def _safe_number(self, value, default=None):
+        """Safely convert value to number, treating 0 as valid"""
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return value if value != 0 else default  # 0 from LLM means "not available"
+        try:
+            num = float(value)
+            return num if num != 0 else default
+        except (ValueError, TypeError):
+            return default
+
+    def _safe_bool(self, value, default=False):
+        """Safely convert value to boolean"""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', 'yes', '1')
+        return bool(value)
+
+    def _build_update_dict(self, enriched_data: dict) -> dict:
         """
-        Update existing golden record with AI enrichment data.
-        Only updates enrichment-related fields, preserves original scraped data.
+        Build dictionary of fields to update from AI enrichment data.
+        Returns a dict that can be passed directly to SQLAlchemy update().
         """
         ai = enriched_data.get('ai_enrichment', {})
         metadata = ai.get('_metadata', {})
@@ -181,85 +239,124 @@ class GoldenJobConsumer:
         company = ai.get('company_insights', {})
         benefits = ai.get('benefits', {})
         role = ai.get('role_classification', {})
+        tech_stack = ai.get('tech_stack', {})
+        skills = ai.get('skills_extraction', {})
 
-        # Update normalized/enriched fields only
+        update = {}
+
         # Location normalization
         if location:
-            city = location.get('city', '')
-            country = location.get('country', '')
-            if city or country:
-                existing.job_location_normalized = f"{city}, {country}".strip(', ')
-            existing.location_city = location.get('city')
-            existing.location_state = location.get('state')
-            existing.location_country = location.get('country')
-            existing.location_timezone = location.get('timezone')
-            if location.get('is_remote') is not None:
-                existing.is_remote = location.get('is_remote')
+            city = self._clean_na(location.get('city'))
+            state = self._clean_na(location.get('state'))
+            country = self._clean_na(location.get('country'))
+            timezone_str = self._clean_na(location.get('timezone'))
+
+            # Build normalized location string
+            location_parts = [p for p in [city, state, country] if p]
+            if location_parts:
+                update['job_location_normalized'] = self._truncate(', '.join(location_parts), 255)
+
+            update['location_city'] = self._truncate(city, 100) if city else None
+            update['location_state'] = self._truncate(state, 100) if state else None
+            update['location_country'] = self._truncate(country, 100) if country else None
+            update['location_timezone'] = self._truncate(timezone_str, 50) if timezone_str else None
+            update['is_remote'] = self._safe_bool(location.get('is_remote'), False)
 
         # Salary normalization
         if currency_norm:
-            existing.currency_raw = currency_norm.get('detected_currency')
-            existing.min_salary_usd = currency_norm.get('min_salary_usd')
-            existing.max_salary_usd = currency_norm.get('max_salary_usd')
-            existing.currency_conversion_rate = currency_norm.get('conversion_rate')
-            if currency_norm.get('conversion_rate'):
-                existing.currency_conversion_date = datetime.now(timezone.utc)
+            update['currency_raw'] = self._sanitize_currency(currency_norm.get('detected_currency'))
+            update['min_salary_usd'] = self._safe_number(currency_norm.get('min_salary_usd'))
+            update['max_salary_usd'] = self._safe_number(currency_norm.get('max_salary_usd'))
+            conversion_rate = self._safe_number(currency_norm.get('conversion_rate'))
+            update['currency_conversion_rate'] = conversion_rate
+            if conversion_rate:
+                update['currency_conversion_date'] = datetime.now(timezone.utc)
 
-        # Seniority normalization
+        # Seniority normalization - always set even if N/A
         if seniority:
-            existing.seniority_level_normalized = seniority.get('normalized')
-            existing.seniority_confidence_score = seniority.get('confidence')
+            normalized_seniority = self._clean_na(seniority.get('normalized'))
+            update['seniority_level_normalized'] = self._truncate(normalized_seniority or 'N/A', 50)
+            update['seniority_confidence_score'] = self._safe_number(seniority.get('confidence'))
 
-        # Work arrangement
+        # Work arrangement - always set even if N/A
         if work_arr:
-            existing.work_arrangement_raw = work_arr.get('details')
-            existing.work_arrangement_normalized = work_arr.get('normalized')
+            normalized_work = self._clean_na(work_arr.get('normalized'))
+            update['work_arrangement_normalized'] = self._truncate(normalized_work or 'N/A', 50)
+            details = self._clean_na(work_arr.get('details'))
+            update['work_arrangement_raw'] = self._truncate(details or 'N/A', 100)
 
         # Scam detection
         if scam:
-            existing.scam_score = scam.get('score')
-            existing.scam_indicators = scam.get('indicators')
+            update['scam_score'] = self._safe_number(scam.get('score'), 0)
+            indicators = scam.get('indicators', [])
+            if isinstance(indicators, list):
+                indicators = [i for i in indicators if self._clean_na(i)]
+            update['scam_indicators'] = indicators if indicators else None
 
-        # Skills extraction
-        skills = ai.get('skills_extraction', {})
+        # Skills extraction - store full skills array
         if skills:
-            existing.skills_extracted = skills.get('skills')
+            skills_list = skills.get('skills', [])
+            if isinstance(skills_list, list) and skills_list:
+                filtered_skills = [s for s in skills_list if isinstance(s, dict) and self._clean_na(s.get('skill'))]
+                update['skills_extracted'] = filtered_skills if filtered_skills else None
 
-        tech_stack = ai.get('tech_stack', {})
+        # Tech stack - combine all technology arrays
         if tech_stack:
-            existing.tech_stack_normalized = tech_stack.get('technologies')
+            all_tech = []
+            for key in ['technologies', 'frameworks', 'tools', 'databases', 'cloud']:
+                tech_list = tech_stack.get(key, [])
+                if isinstance(tech_list, list):
+                    for t in tech_list:
+                        cleaned = self._clean_na(t)
+                        if cleaned and cleaned not in all_tech:
+                            all_tech.append(cleaned)
+            update['tech_stack_normalized'] = all_tech if all_tech else None
 
-        # Company insights
+        # Company insights - always populate
         if company:
-            existing.company_research = company.get('notable_info')
-            existing.company_industry = company.get('industry')
-            existing.company_size = company.get('company_size')
+            notable_info = self._clean_na(company.get('notable_info'))
+            update['company_research'] = notable_info or 'No additional company information available'
+            industry = self._clean_na(company.get('industry'))
+            update['company_industry'] = self._truncate(industry or 'N/A', 100)
+            size = self._clean_na(company.get('company_size'))
+            update['company_size'] = self._truncate(size or 'N/A', 100)
 
         # Benefits
         if benefits:
-            existing.has_stock_options = benefits.get('has_stock_options')
-            existing.stock_options_details = benefits.get('stock_details')
-            existing.other_benefits = benefits.get('other_benefits')
+            update['has_stock_options'] = self._safe_bool(benefits.get('has_stock_options'), False)
+            stock_details = self._clean_na(benefits.get('stock_details'))
+            update['stock_options_details'] = stock_details
+            other = benefits.get('other_benefits', [])
+            if isinstance(other, list):
+                other = [self._clean_na(b) for b in other if self._clean_na(b)]
+            update['other_benefits'] = other if other else None
 
-        # Role classification
+        # Role classification - always populate
         if role:
-            existing.primary_role = role.get('primary_role')
-            existing.role_category = role.get('role_category')
-            existing.is_management = role.get('is_management')
+            primary = self._clean_na(role.get('primary_role'))
+            update['primary_role'] = self._truncate(primary or 'N/A', 100)
+            category = self._clean_na(role.get('role_category'))
+            update['role_category'] = self._truncate(category or 'N/A', 100)
+            update['is_management'] = self._safe_bool(role.get('is_management'), False)
 
         # Processing metadata
-        existing.enriched_at = self._parse_datetime(enriched_data.get('enriched_at')) or datetime.now(timezone.utc)
-        existing.ollama_model_version = metadata.get('model', 'llama3.2:3b')
-        existing.processing_duration_ms = enriched_data.get('processing_duration_ms')
-        existing.enrichment_status = enriched_data.get('enrichment_status', 'completed')
+        update['enriched_at'] = self._parse_datetime(enriched_data.get('enriched_at')) or datetime.now(timezone.utc)
+        update['ollama_model_version'] = self._truncate(metadata.get('model', 'llama3.2:3b'), 50)
+        update['processing_duration_ms'] = enriched_data.get('processing_duration_ms')
+        update['enrichment_status'] = self._truncate(enriched_data.get('enrichment_status', 'completed'), 50)
+        update['ai_prompt_tokens'] = metadata.get('prompt_tokens')
+        update['ai_response_tokens'] = metadata.get('response_tokens')
 
         # Store error if present
         if 'error' in ai:
-            existing.enrichment_errors = ai.get('error')
+            update['enrichment_errors'] = ai.get('error')
 
         # Update metadata
-        existing.updated_at = datetime.now(timezone.utc)
-        existing.enrichment_version = (existing.enrichment_version or 0) + 1
+        update['updated_at'] = datetime.now(timezone.utc)
+        # Increment enrichment_version, handling NULL with coalesce
+        update['enrichment_version'] = func.coalesce(JobListingGolden.enrichment_version, 0) + 1
+
+        return update
 
     async def _handle_failed_message(self, message: AbstractIncomingMessage, error: str):
         """Handle failed message with retry logic"""

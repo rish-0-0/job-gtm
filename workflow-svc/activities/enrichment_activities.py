@@ -60,14 +60,17 @@ async def get_enrichment_chunk_info(chunk_size: int = 100, skip_already_enriched
 
 
 @activity.defn
-async def fetch_enrichment_chunk(offset: int, limit: int, skip_already_enriched: bool = True) -> List[Dict[str, Any]]:
+async def fetch_and_publish_enrichment_chunk(offset: int, limit: int, skip_already_enriched: bool = True) -> int:
     """
-    Fetch a specific chunk of jobs for enrichment.
-    Uses offset/limit for pagination to keep response size small.
+    Fetch a chunk of jobs and publish directly to RabbitMQ.
+    This avoids Temporal's gRPC size limit by not returning job data through Temporal.
+
+    Returns:
+        Number of jobs published
     """
     db = SessionLocal()
     try:
-        logger.info(f"[Enrichment Activity] Fetching enrichment chunk: offset={offset}, limit={limit}")
+        logger.info(f"[Enrichment Activity] Fetching and publishing chunk: offset={offset}, limit={limit}")
 
         query = db.query(JobListingGolden).filter(
             JobListingGolden.detail_scrape_status == 'completed'
@@ -81,33 +84,70 @@ async def fetch_enrichment_chunk(offset: int, limit: int, skip_already_enriched:
 
         jobs = query.order_by(JobListingGolden.id).offset(offset).limit(limit).all()
 
-        result = []
+        if not jobs:
+            logger.info(f"[Enrichment Activity] No jobs found in chunk offset={offset}")
+            return 0
+
+        # Get RabbitMQ channel and publish directly
+        channel = await get_rabbitmq_channel()
+        exchange = await channel.get_exchange(RAW_JOBS_EXCHANGE)
+
+        published_count = 0
         for job in jobs:
-            result.append({
+            job_data = {
                 'id': job.id,
                 'source_job_id': job.source_job_id,
                 'posting_url': job.posting_url,
                 'company_title': job.company_title,
                 'job_role': job.job_role,
+                # Include both field names for compatibility with prompt
                 'job_location': job.job_location_raw,
+                'job_location_raw': job.job_location_raw,
                 'employment_type': job.employment_type_raw,
+                'employment_type_raw': job.employment_type_raw,
                 'salary_range': job.salary_range_raw,
+                'salary_range_raw': job.salary_range_raw,
                 'min_salary': float(job.min_salary_raw) if job.min_salary_raw else None,
+                'min_salary_raw': float(job.min_salary_raw) if job.min_salary_raw else None,
                 'max_salary': float(job.max_salary_raw) if job.max_salary_raw else None,
+                'max_salary_raw': float(job.max_salary_raw) if job.max_salary_raw else None,
                 'required_experience': job.required_experience,
                 'seniority_level': job.seniority_level_raw,
+                'seniority_level_raw': job.seniority_level_raw,
                 'about_company': job.about_company_raw,
+                'about_company_raw': job.about_company_raw,
                 'hiring_team': job.hiring_team_raw,
+                'hiring_team_raw': job.hiring_team_raw,
+                # Full content from detail scraping - critical for AI enrichment
                 'job_description_full': job.job_description_full,
                 'full_page_text': job.full_page_text,
+                'job_description': job.job_description_full,  # Alias for prompt compatibility
+                # Metadata
                 'date_posted': job.date_posted,
                 'scraper_source': job.scraper_source,
                 'scraped_at': job.scraped_at.isoformat() if job.scraped_at else None,
                 'detail_scraped_at': job.detail_scraped_at.isoformat() if job.detail_scraped_at else None,
-            })
+            }
 
-        logger.info(f"[Enrichment Activity] Fetched {len(result)} jobs for chunk")
-        return result
+            message = Message(
+                body=json.dumps(job_data).encode(),
+                delivery_mode=DeliveryMode.PERSISTENT,
+                content_type="application/json",
+                headers={
+                    "source_job_id": job.id,
+                    "posting_url": job.posting_url,
+                    "scraper_source": job.scraper_source or 'unknown'
+                }
+            )
+
+            await exchange.publish(message, routing_key=RAW_JOBS_QUEUE)
+            published_count += 1
+
+        logger.info(f"[Enrichment Activity] Published {published_count} jobs from chunk offset={offset}")
+        return published_count
+    except Exception as e:
+        logger.error(f"[Enrichment Activity] Failed to fetch/publish chunk offset={offset}: {str(e)}", exc_info=True)
+        raise
     finally:
         db.close()
 
@@ -157,22 +197,31 @@ async def fetch_jobs_for_enrichment(skip_already_enriched: bool = True) -> List[
                 'source_job_id': job.source_job_id,
                 'posting_url': job.posting_url,
 
-                # Raw data from card scrape
+                # Raw data from card scrape - include both field names for prompt compatibility
                 'company_title': job.company_title,
                 'job_role': job.job_role,
                 'job_location': job.job_location_raw,
+                'job_location_raw': job.job_location_raw,
                 'employment_type': job.employment_type_raw,
+                'employment_type_raw': job.employment_type_raw,
                 'salary_range': job.salary_range_raw,
+                'salary_range_raw': job.salary_range_raw,
                 'min_salary': float(job.min_salary_raw) if job.min_salary_raw else None,
+                'min_salary_raw': float(job.min_salary_raw) if job.min_salary_raw else None,
                 'max_salary': float(job.max_salary_raw) if job.max_salary_raw else None,
+                'max_salary_raw': float(job.max_salary_raw) if job.max_salary_raw else None,
                 'required_experience': job.required_experience,
                 'seniority_level': job.seniority_level_raw,
+                'seniority_level_raw': job.seniority_level_raw,
                 'about_company': job.about_company_raw,
+                'about_company_raw': job.about_company_raw,
                 'hiring_team': job.hiring_team_raw,
+                'hiring_team_raw': job.hiring_team_raw,
 
-                # Full content from Phase 1 detail scraping - AI will extract all details
+                # Full content from Phase 1 detail scraping - critical for AI enrichment
                 'job_description_full': job.job_description_full,
                 'full_page_text': job.full_page_text,
+                'job_description': job.job_description_full,  # Alias for prompt compatibility
 
                 # Metadata
                 'date_posted': job.date_posted,

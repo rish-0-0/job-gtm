@@ -22,7 +22,7 @@ class EnrichmentWorkflow:
     @workflow.run
     async def run(
         self,
-        chunk_size: int = 50,
+        chunk_size: int = 100,
         batch_size: int = 100,
         skip_already_enriched: bool = True
     ) -> Dict[str, Any]:
@@ -82,7 +82,8 @@ class EnrichmentWorkflow:
                 "message": "No jobs to enrich"
             }
 
-        # Step 2: Process each chunk - fetch and publish
+        # Step 2: Process each chunk - fetch from DB and publish directly to RabbitMQ
+        # This avoids Temporal's gRPC size limit by not returning job data through Temporal
         total_published = 0
         chunks_processed = 0
 
@@ -92,14 +93,14 @@ class EnrichmentWorkflow:
             limit = chunk['limit']
 
             workflow.logger.info(
-                f"[Enrichment Workflow] 📥 Fetching chunk {chunk_index + 1}/{len(chunks)} "
+                f"[Enrichment Workflow] 📥 Processing chunk {chunk_index + 1}/{len(chunks)} "
                 f"(offset={offset}, limit={limit})"
             )
 
-            # Fetch this chunk of jobs
+            # Fetch and publish in one activity - avoids returning large data through Temporal
             try:
-                jobs = await workflow.execute_activity(
-                    "fetch_enrichment_chunk",
+                chunk_published = await workflow.execute_activity(
+                    "fetch_and_publish_enrichment_chunk",
                     args=[offset, limit, skip_already_enriched],
                     start_to_close_timeout=timedelta(minutes=5),
                     retry_policy=RetryPolicy(
@@ -108,45 +109,21 @@ class EnrichmentWorkflow:
                         maximum_interval=timedelta(seconds=10),
                     )
                 )
+                total_published += chunk_published
+                chunks_processed += 1
+
+                workflow.logger.info(
+                    f"[Enrichment Workflow] ✅ Chunk {chunk_index + 1}/{len(chunks)} done: "
+                    f"{chunk_published} published (total: {total_published}/{total_jobs} = {total_published/total_jobs*100:.1f}%)"
+                )
             except Exception as e:
                 workflow.logger.error(
-                    f"[Enrichment Workflow] ❌ Failed to fetch chunk {chunk_index + 1}: {str(e)}"
+                    f"[Enrichment Workflow] ❌ Failed chunk {chunk_index + 1}: {str(e)}"
                 )
                 continue
 
-            # Publish jobs from this chunk in batches
-            chunk_published = 0
-            for i in range(0, len(jobs), batch_size):
-                batch = jobs[i:i + batch_size]
-
-                try:
-                    published = await workflow.execute_activity(
-                        "publish_to_raw_jobs_queue",
-                        args=[batch],
-                        start_to_close_timeout=timedelta(minutes=2),
-                        retry_policy=RetryPolicy(
-                            maximum_attempts=3,
-                            initial_interval=timedelta(seconds=1),
-                            maximum_interval=timedelta(seconds=10),
-                        )
-                    )
-                    chunk_published += published
-                except Exception as e:
-                    workflow.logger.error(
-                        f"[Enrichment Workflow] ❌ Failed to publish batch in chunk {chunk_index + 1}: {str(e)}"
-                    )
-                    continue
-
-            total_published += chunk_published
-            chunks_processed += 1
-
-            workflow.logger.info(
-                f"[Enrichment Workflow] ✅ Chunk {chunk_index + 1}/{len(chunks)} done: "
-                f"{chunk_published} published (total: {total_published}/{total_jobs} = {total_published/total_jobs*100:.1f}%)"
-            )
-
             # Small delay between chunks
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
         workflow.logger.info(
             f"[Enrichment Workflow] ════════════════════════════════════════"
