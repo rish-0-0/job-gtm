@@ -7,6 +7,10 @@ import logging
 from datetime import datetime, timezone
 from temporalio.client import Client
 from workflows.scrape_workflow import ScrapeWorkflow
+from workflows.enrichment_workflow import EnrichmentWorkflow
+from workflows.detail_scrape_workflow import DetailScrapeWorkflow
+from models import JobListing, JobListingGolden
+from database import SessionLocal
 from const import MAX_PAGES
 
 # Configure logging
@@ -27,6 +31,16 @@ class AIWorkflowRequest(BaseModel):
     job_listings: list
     model_type: str
     params: Optional[Dict[str, Any]] = None
+
+class EnrichmentRequest(BaseModel):
+    batch_size: Optional[int] = 100
+    skip_already_enriched: Optional[bool] = True
+
+
+class DetailScrapeRequest(BaseModel):
+    chunk_size: Optional[int] = 50  # Jobs per child workflow
+    max_concurrent_chunks: Optional[int] = 3  # Parallel child workflows
+    max_concurrent_per_chunk: Optional[int] = 5  # Concurrent scrapes within chunk
 
 class WorkflowResponse(BaseModel):
     workflow_id: str
@@ -159,6 +173,187 @@ async def start_ai_workflow(request: AIWorkflowRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start workflow: {str(e)}")
+
+@app.post("/workflows/enrich/trigger", response_model=WorkflowResponse)
+async def trigger_enrichment_workflow(request: EnrichmentRequest = EnrichmentRequest()):
+    """
+    Trigger the enrichment workflow to process all existing job listings
+
+    This will:
+    1. Fetch all jobs from job_listings table
+    2. Filter out already enriched jobs (if skip_already_enriched=True)
+    3. Publish jobs to raw_jobs_for_processing queue
+    4. AI consumer will process them asynchronously
+    5. Enriched jobs will be stored in job_listings_golden table
+
+    Args:
+        batch_size: Number of jobs to publish per batch (default: 100)
+        skip_already_enriched: Skip jobs already in golden table (default: True)
+    """
+    try:
+        logger.info(f"Connecting to Temporal at {TEMPORAL_ADDRESS}")
+        client = await Client.connect(TEMPORAL_ADDRESS)
+        logger.info("Connected to Temporal successfully")
+
+        workflow_id = f"enrich-all-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+        logger.info(f"Starting enrichment workflow with ID: {workflow_id}")
+
+        handle = await client.start_workflow(
+            EnrichmentWorkflow.run,
+            id=workflow_id,
+            task_queue=TEMPORAL_TASK_QUEUE,
+            args=[request.batch_size, request.skip_already_enriched]
+        )
+
+        logger.info(f"Enrichment workflow started: {workflow_id}")
+        logger.info(f"View workflow in Temporal UI: http://localhost:8233/namespaces/default/workflows/{handle.id}")
+
+        return WorkflowResponse(
+            workflow_id=handle.id,
+            run_id=handle.result_run_id,
+            status="started"
+        )
+    except Exception as e:
+        logger.error(f"Failed to start enrichment workflow: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/enrichment/status")
+async def get_enrichment_status():
+    """
+    Get current enrichment pipeline status
+    Returns counts of jobs in each stage
+    """
+    db = SessionLocal()
+    try:
+        total_jobs = db.query(JobListing).count()
+        enriched_jobs = db.query(JobListingGolden).filter(
+            JobListingGolden.enrichment_status == 'completed'
+        ).count()
+
+        return {
+            "total_jobs": total_jobs,
+            "enriched_jobs": enriched_jobs,
+            "pending_enrichment": total_jobs - enriched_jobs,
+            "enrichment_percentage": round((enriched_jobs / total_jobs * 100), 2) if total_jobs > 0 else 0,
+            "message": f"{enriched_jobs} out of {total_jobs} jobs enriched"
+        }
+    except Exception as e:
+        logger.error(f"Failed to get enrichment status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+
+# ============== DETAIL SCRAPING ENDPOINTS ==============
+
+@app.post("/workflows/detail-scrape/trigger", response_model=WorkflowResponse)
+async def trigger_detail_scrape_workflow(request: DetailScrapeRequest = DetailScrapeRequest()):
+    """
+    Trigger the detail scraping workflow to scrape full job details from posting URLs.
+
+    Uses a parent-child workflow pattern to avoid Temporal's history event limit:
+    - Parent workflow (coordinator) spawns child workflows for each chunk
+    - Each child workflow processes a small batch of jobs
+    - This allows processing thousands of jobs without hitting event limits
+
+    This is Phase 1 of the enrichment pipeline:
+    1. Fetch jobs from job_listings table in chunks
+    2. For each chunk, spawn a child workflow to process jobs
+    3. Each child scrapes job details and saves to job_listings_golden table
+    4. Mark jobs as ready for AI enrichment (Phase 2)
+
+    Args:
+        chunk_size: Jobs per child workflow (default: 50)
+        max_concurrent_chunks: Parallel child workflows (default: 3)
+        max_concurrent_per_chunk: Concurrent scrapes within each chunk (default: 5)
+    """
+    try:
+        logger.info(f"Connecting to Temporal at {TEMPORAL_ADDRESS}")
+        client = await Client.connect(TEMPORAL_ADDRESS)
+        logger.info("Connected to Temporal successfully")
+
+        workflow_id = f"detail-scrape-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+        logger.info(f"Starting detail scrape coordinator workflow with ID: {workflow_id}")
+        logger.info(f"Config: chunk_size={request.chunk_size}, max_concurrent_chunks={request.max_concurrent_chunks}, max_concurrent_per_chunk={request.max_concurrent_per_chunk}")
+
+        handle = await client.start_workflow(
+            DetailScrapeWorkflow.run,
+            id=workflow_id,
+            task_queue=TEMPORAL_TASK_QUEUE,
+            args=[request.chunk_size, request.max_concurrent_chunks, request.max_concurrent_per_chunk]
+        )
+
+        logger.info(f"Detail scrape workflow started: {workflow_id}")
+        logger.info(f"View workflow in Temporal UI: http://localhost:8233/namespaces/default/workflows/{handle.id}")
+
+        return WorkflowResponse(
+            workflow_id=handle.id,
+            run_id=handle.result_run_id,
+            status="started"
+        )
+    except Exception as e:
+        logger.error(f"Failed to start detail scrape workflow: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/detail-scrape/status")
+async def get_detail_scrape_status():
+    """
+    Get current detail scraping pipeline status.
+    Returns counts of jobs in each stage of the pipeline.
+    """
+    db = SessionLocal()
+    try:
+        total_raw = db.query(JobListing).count()
+        total_golden = db.query(JobListingGolden).count()
+
+        detail_scraped = db.query(JobListingGolden).filter(
+            JobListingGolden.detail_scrape_status == 'completed'
+        ).count()
+
+        detail_failed = db.query(JobListingGolden).filter(
+            JobListingGolden.detail_scrape_status == 'failed'
+        ).count()
+
+        pending_enrichment = db.query(JobListingGolden).filter(
+            JobListingGolden.detail_scrape_status == 'completed',
+            JobListingGolden.enrichment_status == 'pending'
+        ).count()
+
+        enriched = db.query(JobListingGolden).filter(
+            JobListingGolden.enrichment_status == 'completed'
+        ).count()
+
+        not_yet_processed = total_raw - total_golden
+
+        return {
+            "pipeline_status": {
+                "phase_1_detail_scraping": {
+                    "total_raw_jobs": total_raw,
+                    "not_yet_processed": not_yet_processed,
+                    "detail_scraped": detail_scraped,
+                    "detail_failed": detail_failed,
+                    "scrape_percentage": round((detail_scraped / total_raw * 100), 2) if total_raw > 0 else 0
+                },
+                "phase_2_ai_enrichment": {
+                    "pending_enrichment": pending_enrichment,
+                    "enriched": enriched,
+                    "enrichment_percentage": round((enriched / detail_scraped * 100), 2) if detail_scraped > 0 else 0
+                }
+            },
+            "summary": {
+                "total_raw_jobs": total_raw,
+                "fully_processed": enriched,
+                "overall_percentage": round((enriched / total_raw * 100), 2) if total_raw > 0 else 0
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get detail scrape status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
 
 @app.get("/workflows/{workflow_id}", response_model=WorkflowStatusResponse)
 async def get_workflow_status(workflow_id: str):

@@ -10,7 +10,7 @@ import os
 
 def wait_for_postgres():
     """Wait for PostgreSQL to be ready"""
-    print("Waiting for postgres...")
+    print("Waiting for postgres...", flush=True)
     max_attempts = 60
     attempt = 0
 
@@ -22,7 +22,7 @@ def wait_for_postgres():
                 text=True
             )
             if result.returncode == 0:
-                print("PostgreSQL is ready!")
+                print("PostgreSQL is ready!", flush=True)
                 return True
         except Exception as e:
             pass
@@ -30,12 +30,12 @@ def wait_for_postgres():
         time.sleep(1)
         attempt += 1
 
-    print("ERROR: PostgreSQL failed to become ready")
+    print("ERROR: PostgreSQL failed to become ready", flush=True)
     return False
 
 def init_database():
     """Initialize database and run migrations"""
-    print("Initializing database...")
+    print("Initializing database...", flush=True)
     try:
         result = subprocess.run(
             ["python", "init_db.py"],
@@ -43,39 +43,12 @@ def init_database():
         )
         return True
     except subprocess.CalledProcessError as e:
-        print(f"ERROR: Database initialization failed: {e}")
+        print(f"ERROR: Database initialization failed: {e}", flush=True)
         return False
-
-def start_worker():
-    """Start the Temporal worker in background"""
-    print("Starting Temporal worker...")
-    worker_process = subprocess.Popen(
-        ["python", "worker.py"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
-
-    # Give worker a moment to start
-    time.sleep(2)
-
-    if worker_process.poll() is not None:
-        print("ERROR: Worker failed to start")
-        # Capture and print the error output
-        stdout, stderr = worker_process.communicate()
-        if stdout:
-            print(f"Worker stdout: {stdout}")
-        if stderr:
-            print(f"Worker stderr: {stderr}")
-        return None
-
-    print("✅ Temporal worker started")
-    return worker_process
 
 def start_application():
     """Start the FastAPI application"""
-    print("Starting FastAPI application...")
+    print("Starting FastAPI application...", flush=True)
     port = os.getenv("PORT", "8000")
 
     # Use os.execvp to replace the current process
@@ -100,13 +73,7 @@ def main():
     if not init_database():
         sys.exit(1)
 
-    # Start Temporal worker
-    worker_process = start_worker()
-    if worker_process is None:
-        sys.exit(1)
-
-    # Start application (this will replace the current process)
-    # The worker runs in background
+    # Start application (Temporal worker runs in separate container)
     start_application()
 
 if __name__ == "__main__":
