@@ -109,7 +109,10 @@ services:
       - SCRAPER_URL=http://scraper:6000
       - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
       - RABBITMQ_URL=amqp://jobgtm:jobgtm_password@rabbitmq:5672/
+      - API_ALEMBIC_VERSIONS_PATH=/app/api_alembic/versions
       - PYTHONUNBUFFERED=1
+    volumes:
+      - ./api/alembic/versions:/app/api_alembic/versions
     entrypoint: []
     command: ["python", "worker.py"]
     restart: unless-stopped
@@ -210,4 +213,43 @@ services:
       - PYTHONUNBUFFERED=1
     entrypoint: []
     command: ["python", "consumers/golden_job_consumer.py"]
+    restart: unless-stopped
+
+  dashboard-api:
+    container_name: dashboard-api
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://jobgtm:jobgtm_password@postgres:5432/jobgtm
+      - API_HOST=0.0.0.0
+      - API_PORT=8001
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_TASK_QUEUE=job-gtm-queue
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  dashboard-ui:
+    container_name: dashboard-ui
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    depends_on:
+      dashboard-api:
+        condition: service_healthy
+    ports:
+      - "3000:80"
     restart: unless-stopped
