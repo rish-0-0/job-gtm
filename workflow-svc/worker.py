@@ -12,6 +12,9 @@ from temporalio.worker import Worker
 from workflows.scrape_workflow import ScrapeWorkflow
 from workflows.enrichment_workflow import EnrichmentWorkflow
 from workflows.detail_scrape_workflow import DetailScrapeWorkflow, DetailScrapeChunkWorkflow
+from workflows.refresh_view_workflow import RefreshMaterializedViewWorkflow
+from workflows.create_view_workflow import CreateCustomViewWorkflow
+from workflows.delete_view_workflow import DeleteCustomViewWorkflow
 from activities.scrape_activities import (
     get_available_scrapers,
     call_scraper_service,
@@ -32,6 +35,20 @@ from activities.detail_scrape_activities import (
     save_detail_scraped_job,
     publish_detail_scraped_jobs,
     get_detail_scrape_stats,
+)
+from activities.refresh_view_activities import (
+    refresh_materialized_view,
+    publish_view_refresh_notification,
+)
+from activities.create_view_activities import (
+    validate_view_config,
+    create_view_migration,
+    execute_view_migration,
+    update_view_status,
+    validate_view_deletion,
+    create_delete_view_migration,
+    execute_delete_view_migration,
+    remove_view_record,
 )
 from queue_config import setup_queues, close_rabbitmq_connection
 
@@ -79,6 +96,9 @@ async def main():
             EnrichmentWorkflow,
             DetailScrapeWorkflow,
             DetailScrapeChunkWorkflow,  # Child workflow for chunked processing
+            RefreshMaterializedViewWorkflow,
+            CreateCustomViewWorkflow,
+            DeleteCustomViewWorkflow,
         ],
         activities=[
             # Scrape activities
@@ -97,6 +117,19 @@ async def main():
             save_detail_scraped_job,
             publish_detail_scraped_jobs,
             get_detail_scrape_stats,
+            # Refresh view activities
+            refresh_materialized_view,
+            publish_view_refresh_notification,
+            # Create custom view activities
+            validate_view_config,
+            create_view_migration,
+            execute_view_migration,
+            update_view_status,
+            # Delete custom view activities
+            validate_view_deletion,
+            create_delete_view_migration,
+            execute_delete_view_migration,
+            remove_view_record,
         ],
         max_concurrent_workflow_tasks=200,
         max_concurrent_activities=100,
