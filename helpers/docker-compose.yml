@@ -1,0 +1,60 @@
+services:
+  ollama:
+    container_name: helper-ollama
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-8}   # Handle 8 parallel requests (16GB VRAM)
+      - OLLAMA_MAX_LOADED_MODELS=1                      # Keep only 1 model in memory
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ollama-init:
+    container_name: helper-ollama-init
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./init_scripts:/scripts
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/bash", "/scripts/ollama-init.sh"]
+    restart: "no"
+
+  ai-enrichment-consumer:
+    container_name: helper-ai-consumer
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      - RABBITMQ_URL=${RABBITMQ_URL}
+      - OLLAMA_URL=http://ollama:11434
+      - ENRICHMENT_BATCH_SIZE=${ENRICHMENT_BATCH_SIZE:-20}
+      - OLLAMA_RATE_LIMIT=${OLLAMA_RATE_LIMIT:-8}
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    deploy:
+      mode: replicated
+      replicas: ${CONSUMER_REPLICAS:-1}

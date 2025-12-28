@@ -1,0 +1,5 @@
+# Environment file (contains IP addresses)
+.env
+
+# Data directory (Ollama models are large)
+data/
