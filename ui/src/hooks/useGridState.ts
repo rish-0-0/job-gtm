@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, RefObject } from 'react'
+import { useState, useCallback, useMemo, useRef, RefObject } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import isEqual from 'lodash/isEqual'
 import {
@@ -10,6 +10,7 @@ import {
 
 export function useGridState(gridRef: RefObject<AgGridReact | null>) {
   const [currentState, setCurrentState] = useState<GridViewState>(DEFAULT_VIEW_STATE)
+  const isResettingRef = useRef(false)
 
   const hasChanges = useMemo(() => {
     return !isEqual(DEFAULT_VIEW_STATE, currentState)
@@ -74,6 +75,8 @@ export function useGridState(gridRef: RefObject<AgGridReact | null>) {
   }, [currentState.columnOrder, currentState.hiddenColumns])
 
   const syncFromGrid = useCallback(() => {
+    // Skip sync if we're in the middle of resetting
+    if (isResettingRef.current) return
     if (!gridRef.current?.api) return
 
     const columnState = gridRef.current.api.getColumnState()
@@ -114,6 +117,9 @@ export function useGridState(gridRef: RefObject<AgGridReact | null>) {
   }, [gridRef])
 
   const resetToDefault = useCallback(() => {
+    // Set flag to prevent syncFromGrid from overwriting our reset
+    isResettingRef.current = true
+
     setCurrentState(DEFAULT_VIEW_STATE)
 
     if (gridRef.current?.api) {
@@ -129,6 +135,11 @@ export function useGridState(gridRef: RefObject<AgGridReact | null>) {
         applyOrder: true,
       })
     }
+
+    // Clear flag after a short delay to allow events to settle
+    setTimeout(() => {
+      isResettingRef.current = false
+    }, 100)
   }, [gridRef])
 
   const getSortParam = useCallback(() => {

@@ -14,8 +14,29 @@ interface AvailableColumnsResponse {
   columns: string[]
 }
 
+export interface ViewDataResponse {
+  data: Record<string, unknown>[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+  view_name: string
+  columns: string[]
+}
+
 async function fetchCustomViews(): Promise<ListViewsResponse> {
   const response = await apiClient.get<ListViewsResponse>('/views')
+  return response.data
+}
+
+async function fetchCustomViewData(
+  name: string,
+  page: number,
+  pageSize: number
+): Promise<ViewDataResponse> {
+  const response = await apiClient.get<ViewDataResponse>(`/views/${name}/data`, {
+    params: { page, page_size: pageSize },
+  })
   return response.data
 }
 
@@ -68,5 +89,45 @@ export function useDeleteView() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['custom-views'] })
     },
+  })
+}
+
+export function useCustomViewData(name: string, page: number, pageSize: number = 50) {
+  return useQuery({
+    queryKey: ['custom-view-data', name, page, pageSize],
+    queryFn: () => fetchCustomViewData(name, page, pageSize),
+    enabled: !!name,
+  })
+}
+
+export interface SalaryByLocationData {
+  location: string
+  avgMinSalary: number
+  avgMaxSalary: number
+  jobCount: number
+}
+
+export interface SalaryChartResponse {
+  data: SalaryByLocationData[]
+  metric: string
+  groupBy: string
+  error?: string
+}
+
+async function fetchViewSalaryByLocation(
+  name: string,
+  limit: number = 15
+): Promise<SalaryChartResponse> {
+  const response = await apiClient.get<SalaryChartResponse>(`/views/${name}/charts/salary-by-location`, {
+    params: { limit },
+  })
+  return response.data
+}
+
+export function useViewSalaryByLocation(name: string, limit: number = 15) {
+  return useQuery({
+    queryKey: ['view-salary-by-location', name, limit],
+    queryFn: () => fetchViewSalaryByLocation(name, limit),
+    enabled: !!name,
   })
 }

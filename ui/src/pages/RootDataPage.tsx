@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback } from 'react'
 import { AgGridReact } from 'ag-grid-react'
-import { useRootData } from '../api/rootData'
+import { useRootData, useSalaryByLocation } from '../api/rootData'
 import { useCreateView } from '../api/customViews'
 import RootDataTable from '../components/RootDataTable'
 import { DataTableToolbar } from '../components/RootDataTable/DataTableToolbar'
 import { SaveViewDialog } from '../components/RootDataTable/SaveViewDialog'
+import { SalaryByLocationChart } from '../components/charts/SalaryByLocationChart'
 import { useGridState } from '../hooks/useGridState'
 import { useToast } from '../hooks/use-toast'
 import type { SaveViewRequest } from '../types/gridState'
@@ -37,6 +38,8 @@ function RootDataPage() {
     sortParam,
     groupByParam
   )
+
+  const { data: chartData, isLoading: chartLoading } = useSalaryByLocation(15)
 
   const createViewMutation = useCreateView()
 
@@ -115,6 +118,13 @@ function RootDataPage() {
         <h2>Root Data</h2>
       </div>
 
+      <div className="chart-container">
+        <SalaryByLocationChart
+          data={chartData?.data ?? []}
+          isLoading={chartLoading}
+        />
+      </div>
+
       <DataTableToolbar
         hiddenColumns={currentState.hiddenColumns}
         groupBy={currentState.groupBy}
@@ -131,6 +141,8 @@ function RootDataPage() {
           ref={gridRef}
           data={data?.data ?? []}
           loading={isLoading}
+          columns={data?.columns}
+          grouped={data?.grouped ?? false}
           onColumnMoved={handleColumnMoved}
           onSortChanged={handleSortChanged}
           onColumnVisibilityChanged={handleColumnVisibilityChanged}

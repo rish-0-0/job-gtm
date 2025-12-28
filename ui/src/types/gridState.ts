@@ -41,24 +41,23 @@ export interface CreateViewResponse {
   message: string
 }
 
+// These must match the columns defined in RootDataTable.tsx
 export const ALL_COLUMNS = [
   'id',
   'company_title',
   'job_role',
-  'job_location_normalized',
-  'employment_type_normalized',
+  'seniority_level_normalized',
   'min_salary_usd',
   'max_salary_usd',
-  'seniority_level_normalized',
-  'is_remote',
   'location_city',
   'location_country',
+  'is_remote',
+  'employment_type_normalized',
   'company_industry',
   'company_size',
   'primary_role',
   'role_category',
   'scraper_source',
-  'enrichment_status',
   'created_at',
 ] as const
 
@@ -81,21 +80,19 @@ export const COLUMN_LABELS: Record<ColumnId, string> = {
   id: 'ID',
   company_title: 'Company',
   job_role: 'Role',
-  job_location_normalized: 'Location',
-  employment_type_normalized: 'Employment Type',
+  seniority_level_normalized: 'Seniority',
   min_salary_usd: 'Min Salary',
   max_salary_usd: 'Max Salary',
-  seniority_level_normalized: 'Seniority',
-  is_remote: 'Remote',
   location_city: 'City',
   location_country: 'Country',
+  is_remote: 'Remote',
+  employment_type_normalized: 'Type',
   company_industry: 'Industry',
-  company_size: 'Company Size',
+  company_size: 'Size',
   primary_role: 'Primary Role',
-  role_category: 'Role Category',
+  role_category: 'Category',
   scraper_source: 'Source',
-  enrichment_status: 'Enrichment',
-  created_at: 'Created At',
+  created_at: 'Created',
 }
 
 export const DEFAULT_VIEW_STATE: GridViewState = {

@@ -27,4 +27,12 @@ export interface PaginatedResponse<T> {
   total_pages: number
 }
 
-export type RootDataResponse = PaginatedResponse<RootDataRow>
+export interface RootDataResponse {
+  data: Record<string, unknown>[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+  columns: string[]
+  grouped: boolean
+}

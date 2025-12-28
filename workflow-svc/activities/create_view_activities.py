@@ -1,8 +1,7 @@
 """
 Temporal activities for creating and deleting custom materialized views.
-Handles validation, migration file creation, and execution.
+Handles validation and direct SQL execution for view creation/deletion.
 """
-import os
 import logging
 from datetime import datetime
 from typing import Dict, Any, List
@@ -35,13 +34,6 @@ VALID_COLUMNS = [
     "created_at",
 ]
 
-# Path to API alembic versions directory
-# Note: This path is relative to the workflow-svc container
-# In docker-compose, we'll mount the api/alembic directory
-API_ALEMBIC_VERSIONS_PATH = os.getenv(
-    "API_ALEMBIC_VERSIONS_PATH",
-    "/app/api_alembic/versions"
-)
 
 
 @activity.defn
@@ -128,98 +120,42 @@ async def validate_view_config(params: Dict[str, Any]) -> Dict[str, Any]:
 @activity.defn
 async def create_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Create an Alembic migration file for the custom view.
+    Prepare for creating a custom materialized view.
+
+    Note: We no longer create Alembic migration files since the SQL is executed
+    directly. The view metadata is tracked in the custom_materialized_views table.
 
     Args:
         params: Dictionary with view_id, name, view_name, columns
 
     Returns:
-        Dictionary with migration file info
+        Dictionary with revision info (timestamp-based identifier)
     """
     view_id = params["view_id"]
     name = params["name"]
     view_name = params["view_name"]
     columns = params["columns"]
 
-    logger.info(f"[Migration Activity] Creating migration for: {view_name}")
+    logger.info(f"[Migration Activity] Preparing view creation for: {view_name}")
 
-    # Generate revision ID (timestamp-based for uniqueness)
+    # Generate revision ID (timestamp-based for tracking purposes)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     revision = f"custom_{timestamp}_{name}"
 
-    # Build column list for SQL
-    columns_sql = ",\n            ".join(columns)
+    logger.info(f"[Migration Activity] ✅ Prepared revision: {revision}")
 
-    # Generate migration file content
-    migration_content = f'''"""Create custom materialized view: {name}
-
-Revision ID: {revision}
-Revises: 002
-Create Date: {datetime.now().isoformat()}
-
-Auto-generated migration for custom view.
-"""
-from typing import Sequence, Union
-
-from alembic import op
-import sqlalchemy as sa
-
-
-revision: str = "{revision}"
-down_revision: Union[str, None] = "002"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
-
-
-def upgrade() -> None:
-    op.execute("""
-        CREATE MATERIALIZED VIEW {view_name} AS
-        SELECT
-            {columns_sql}
-        FROM mv_root_data
-    """)
-
-    op.execute("""
-        CREATE UNIQUE INDEX idx_{view_name}_id ON {view_name}(id)
-    """)
-
-
-def downgrade() -> None:
-    op.execute("DROP MATERIALIZED VIEW IF EXISTS {view_name}")
-'''
-
-    # Write migration file
-    migration_filename = f"{revision}.py"
-    migration_path = os.path.join(API_ALEMBIC_VERSIONS_PATH, migration_filename)
-
-    try:
-        # Ensure directory exists
-        os.makedirs(API_ALEMBIC_VERSIONS_PATH, exist_ok=True)
-
-        with open(migration_path, "w") as f:
-            f.write(migration_content)
-
-        logger.info(f"[Migration Activity] ✅ Created migration file: {migration_filename}")
-
-        return {
-            "revision": revision,
-            "filename": migration_filename,
-            "path": migration_path,
-            "columns": columns
-        }
-
-    except Exception as e:
-        logger.error(f"[Migration Activity] ❌ Failed to create migration: {str(e)}")
-        raise
+    return {
+        "revision": revision,
+        "columns": columns
+    }
 
 
 @activity.defn
 async def execute_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Execute the migration to create the materialized view.
+    Execute the SQL to create the materialized view.
 
-    Instead of running alembic upgrade (which requires alembic context),
-    we directly execute the SQL to create the view.
+    Directly executes SQL to create the view - no Alembic migration files needed.
 
     Args:
         params: Dictionary with view_id, view_name, revision
@@ -231,17 +167,11 @@ async def execute_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
     view_name = params["view_name"]
     revision = params["revision"]
 
-    logger.info(f"[Execute Activity] Executing migration for: {view_name}")
+    logger.info(f"[Execute Activity] Creating materialized view: {view_name}")
 
     db = SessionLocal()
     try:
-        # Read the migration file to get the SQL
-        migration_path = os.path.join(API_ALEMBIC_VERSIONS_PATH, f"{revision}.py")
-
-        if not os.path.exists(migration_path):
-            raise FileNotFoundError(f"Migration file not found: {migration_path}")
-
-        # Parse columns from custom_materialized_views table
+        # Get columns from custom_materialized_views table
         result = db.execute(
             text("SELECT columns FROM custom_materialized_views WHERE id = :view_id"),
             {"view_id": view_id}
@@ -286,7 +216,7 @@ async def execute_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
 
     except Exception as e:
         db.rollback()
-        logger.error(f"[Execute Activity] ❌ Migration execution failed: {str(e)}")
+        logger.error(f"[Execute Activity] ❌ View creation failed: {str(e)}")
         raise
     finally:
         db.close()
@@ -419,80 +349,32 @@ async def validate_view_deletion(params: Dict[str, Any]) -> Dict[str, Any]:
 @activity.defn
 async def create_delete_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Create an Alembic migration file for dropping the custom view.
+    Prepare for deleting a custom materialized view.
+
+    Note: We no longer create Alembic migration files since the SQL is executed
+    directly. The view metadata is tracked in the custom_materialized_views table.
 
     Args:
         params: Dictionary with view_id, name, view_name
 
     Returns:
-        Dictionary with migration file info
+        Dictionary with revision info (timestamp-based identifier)
     """
     view_id = params["view_id"]
     name = params["name"]
     view_name = params["view_name"]
 
-    logger.info(f"[Delete Migration Activity] Creating deletion migration for: {view_name}")
+    logger.info(f"[Delete Migration Activity] Preparing deletion for: {view_name}")
 
-    # Generate revision ID (timestamp-based for uniqueness)
+    # Generate revision ID (timestamp-based for tracking purposes)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     revision = f"delete_{timestamp}_{name}"
 
-    # Generate migration file content
-    migration_content = f'''"""Delete custom materialized view: {name}
+    logger.info(f"[Delete Migration Activity] ✅ Prepared revision: {revision}")
 
-Revision ID: {revision}
-Revises: 002
-Create Date: {datetime.now().isoformat()}
-
-Auto-generated migration for deleting custom view.
-"""
-from typing import Sequence, Union
-
-from alembic import op
-import sqlalchemy as sa
-
-
-revision: str = "{revision}"
-down_revision: Union[str, None] = "002"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
-
-
-def upgrade() -> None:
-    # Drop the index first
-    op.execute("DROP INDEX IF EXISTS idx_{view_name}_id")
-    # Drop the materialized view
-    op.execute("DROP MATERIALIZED VIEW IF EXISTS {view_name}")
-
-
-def downgrade() -> None:
-    # Note: downgrade would require knowing the original columns
-    # which is not stored in this migration. Manual intervention needed.
-    pass
-'''
-
-    # Write migration file
-    migration_filename = f"{revision}.py"
-    migration_path = os.path.join(API_ALEMBIC_VERSIONS_PATH, migration_filename)
-
-    try:
-        # Ensure directory exists
-        os.makedirs(API_ALEMBIC_VERSIONS_PATH, exist_ok=True)
-
-        with open(migration_path, "w") as f:
-            f.write(migration_content)
-
-        logger.info(f"[Delete Migration Activity] ✅ Created migration file: {migration_filename}")
-
-        return {
-            "revision": revision,
-            "filename": migration_filename,
-            "path": migration_path
-        }
-
-    except Exception as e:
-        logger.error(f"[Delete Migration Activity] ❌ Failed to create migration: {str(e)}")
-        raise
+    return {
+        "revision": revision
+    }
 
 
 @activity.defn
