@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 echo "============================================"
@@ -7,7 +7,7 @@ echo "============================================"
 echo ""
 
 echo "Waiting for Ollama service to be ready..."
-until ollama list &> /dev/null; do
+while ! ollama list > /dev/null 2>&1; do
     echo "Ollama not ready yet, waiting..."
     sleep 2
 done

@@ -35,7 +35,7 @@ services:
       - ./init_scripts:/scripts
     environment:
       - OLLAMA_HOST=ollama:11434
-    entrypoint: ["/bin/bash", "/scripts/ollama-init.sh"]
+    entrypoint: ["/bin/sh", "-c", "sed -i 's/\\r$//' /scripts/ollama-init.sh && /bin/sh /scripts/ollama-init.sh"]
     restart: "no"
 
   ai-enrichment-consumer:
