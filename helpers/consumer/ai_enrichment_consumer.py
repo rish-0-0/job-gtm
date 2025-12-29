@@ -228,7 +228,13 @@ class AIEnrichmentConsumer:
             # Publish to enriched_jobs queue
             await self._publish_with_retry(final_data)
 
-            await message.ack()
+            # Acknowledge message
+            try:
+                await message.ack()
+            except Exception as ack_error:
+                logger.warning(f"Could not ack message (channel may be closed): {ack_error}")
+                # Message will be requeued automatically when connection drops
+
             logger.info(f"[Helper] Done: {job_data['posting_url']} ({total_duration}ms)")
             return True
 
@@ -288,7 +294,9 @@ class AIEnrichmentConsumer:
                 logger.error(f"Max retries exceeded, sending to DLQ: {error}")
                 await message.reject(requeue=False)
         except Exception as e:
-            logger.error(f"Error handling failed message: {e}")
+            # If channel is closed/invalid, we can't nack/reject
+            # The message will be requeued automatically when connection drops
+            logger.warning(f"Could not handle failed message (channel may be closed): {e}")
 
     async def start(self):
         """Start the consumer with automatic reconnection."""
