@@ -52,6 +52,12 @@ class AIEnrichmentConsumer:
         # Rate limiter for Ollama
         self.ollama_semaphore = asyncio.Semaphore(OLLAMA_RATE_LIMIT)
 
+        # Publisher connection (will be initialized in start())
+        self.publisher_connection = None
+        self.publisher_channel = None
+        self.enriched_exchange = None
+        self.publisher_lock = asyncio.Lock()
+
         # Log configuration
         logger.info(f"[Helper Consumer] Configuration:")
         logger.info(f"  - RabbitMQ URL: {RABBITMQ_URL.split('@')[1] if '@' in RABBITMQ_URL else RABBITMQ_URL}")
@@ -200,39 +206,56 @@ class AIEnrichmentConsumer:
             await self._handle_failed_message(message, str(e))
             return False
 
-    async def _publish_to_enriched_queue(self, data: dict):
-        """Publish enriched job to enriched_jobs queue"""
+    async def _ensure_publisher_connection(self):
+        """Ensure publisher connection and exchange are ready"""
         from aio_pika import ExchangeType
 
+        async with self.publisher_lock:
+            # Check if connection is still valid
+            if self.publisher_connection is not None and not self.publisher_connection.is_closed:
+                if self.publisher_channel is not None and not self.publisher_channel.is_closed:
+                    return  # Connection is good
+
+            # Create new connection
+            logger.info("[Helper] Establishing publisher connection...")
+            self.publisher_connection = await connect_robust(RABBITMQ_URL)
+            self.publisher_channel = await self.publisher_connection.channel()
+
+            # Declare exchange
+            self.enriched_exchange = await self.publisher_channel.declare_exchange(
+                ENRICHED_JOBS_EXCHANGE,
+                ExchangeType.DIRECT,
+                durable=True
+            )
+            logger.info("[Helper] Publisher connection established")
+
+    async def _publish_to_enriched_queue(self, data: dict):
+        """Publish enriched job to enriched_jobs queue"""
         try:
-            connection = await connect_robust(RABBITMQ_URL)
-            async with connection:
-                channel = await connection.channel()
+            # Ensure we have a valid connection
+            await self._ensure_publisher_connection()
 
-                # Declare exchange (idempotent - won't recreate if exists)
-                exchange = await channel.declare_exchange(
-                    ENRICHED_JOBS_EXCHANGE,
-                    ExchangeType.DIRECT,
-                    durable=True
-                )
+            message = Message(
+                body=json.dumps(data).encode(),
+                delivery_mode=DeliveryMode.PERSISTENT,
+                content_type="application/json",
+                headers={
+                    "source_job_id": data.get('id'),
+                    "posting_url": data['posting_url'],
+                    "enrichment_status": data.get('enrichment_status'),
+                    "enriched_by": "helper-system"
+                }
+            )
 
-                message = Message(
-                    body=json.dumps(data).encode(),
-                    delivery_mode=DeliveryMode.PERSISTENT,
-                    content_type="application/json",
-                    headers={
-                        "source_job_id": data.get('id'),
-                        "posting_url": data['posting_url'],
-                        "enrichment_status": data.get('enrichment_status'),
-                        "enriched_by": "helper-system"
-                    }
-                )
-
-                await exchange.publish(message, routing_key=ENRICHED_JOBS_QUEUE)
-                logger.debug(f"Published enriched job to queue: {data['posting_url']}")
+            await self.enriched_exchange.publish(message, routing_key=ENRICHED_JOBS_QUEUE)
+            logger.debug(f"Published enriched job to queue: {data['posting_url']}")
 
         except Exception as e:
             logger.error(f"Failed to publish to enriched queue: {str(e)}")
+            # Reset connection so next attempt will reconnect
+            self.publisher_connection = None
+            self.publisher_channel = None
+            self.enriched_exchange = None
             raise
 
     async def _handle_failed_message(self, message: AbstractIncomingMessage, error: str):
@@ -273,16 +296,46 @@ class AIEnrichmentConsumer:
             logger.warning("Ollama service health check failed - will retry on first job")
 
         # Connect to RabbitMQ with retry
-        logger.info(f"Connecting to remote RabbitMQ...")
+        # Mask password in URL for logging
+        safe_url = RABBITMQ_URL
+        if '@' in RABBITMQ_URL:
+            parts = RABBITMQ_URL.split('@')
+            safe_url = f"amqp://***:***@{parts[1]}"
+
+        logger.info(f"Connecting to remote RabbitMQ at: {safe_url}")
+        logger.info(f"(Full URL configured via RABBITMQ_URL environment variable)")
+
         max_attempts = 30
         for attempt in range(1, max_attempts + 1):
             try:
                 logger.info(f"Connection attempt {attempt}/{max_attempts}...")
                 connection = await connect_robust(RABBITMQ_URL)
+                logger.info("Successfully connected to RabbitMQ!")
                 break
             except Exception as e:
+                error_msg = str(e)
+                if "Connection refused" in error_msg:
+                    logger.error(f"Connection REFUSED - Is RabbitMQ running? Is the IP correct?")
+                    logger.error(f"Check: 1) Main system running  2) IP in .env  3) Firewall allows port 5672")
+                elif "timeout" in error_msg.lower():
+                    logger.error(f"Connection TIMEOUT - Network issue or wrong IP address")
+                elif "Authentication" in error_msg or "access" in error_msg.lower():
+                    logger.error(f"Authentication FAILED - Check username/password in RABBITMQ_URL")
+
                 if attempt == max_attempts:
-                    logger.error("Failed to connect to RabbitMQ after max attempts")
+                    logger.error("=" * 60)
+                    logger.error("  FAILED TO CONNECT TO RABBITMQ")
+                    logger.error("=" * 60)
+                    logger.error(f"URL: {safe_url}")
+                    logger.error(f"Error: {e}")
+                    logger.error("")
+                    logger.error("Troubleshooting:")
+                    logger.error("1. Check RABBITMQ_URL in your .env file")
+                    logger.error("2. Verify main system's IP address")
+                    logger.error("3. Ensure RabbitMQ is running on main system")
+                    logger.error("4. Check firewall allows port 5672")
+                    logger.error("5. Test: telnet <main-ip> 5672")
+                    logger.error("=" * 60)
                     raise
                 logger.warning(f"RabbitMQ connection failed: {e}, retrying in 2s...")
                 await asyncio.sleep(2)
@@ -324,6 +377,11 @@ class AIEnrichmentConsumer:
                 await batch_processor_task
             except asyncio.CancelledError:
                 pass
+
+            # Close publisher connection
+            if self.publisher_connection and not self.publisher_connection.is_closed:
+                await self.publisher_connection.close()
+                logger.info("Publisher connection closed")
 
         logger.info("AI Enrichment Consumer stopped")
 
