@@ -13,10 +13,11 @@ import os
 import signal
 import sys
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
-from aio_pika import connect_robust, Message, DeliveryMode
-from aio_pika.abc import AbstractIncomingMessage
+from aio_pika import connect_robust, Message, DeliveryMode, ExchangeType
+from aio_pika.abc import AbstractIncomingMessage, AbstractRobustConnection, AbstractChannel, AbstractExchange
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
 from queue_config import (
     RABBITMQ_URL, RAW_JOBS_QUEUE, ENRICHED_JOBS_QUEUE,
@@ -36,6 +37,82 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class RobustRabbitMQ:
+    """
+    Reusable RabbitMQ connection manager with automatic reconnection.
+    Handles heartbeat configuration and retry logic.
+    """
+
+    def __init__(self, url: str, name: str = "RabbitMQ"):
+        self.url = self._add_heartbeat(url, heartbeat=0)
+        self.name = name
+        self.connection: Optional[AbstractRobustConnection] = None
+        self.channel: Optional[AbstractChannel] = None
+        self.lock = asyncio.Lock()
+
+    @staticmethod
+    def _add_heartbeat(url: str, heartbeat: int = 0) -> str:
+        """Add heartbeat parameter to RabbitMQ URL."""
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query)
+        query_params['heartbeat'] = [str(heartbeat)]
+        new_query = urlencode(query_params, doseq=True)
+        return urlunparse((
+            parsed.scheme, parsed.netloc, parsed.path,
+            parsed.params, new_query, parsed.fragment
+        ))
+
+    async def connect(self, max_attempts: int = 10, retry_delay: int = 5) -> AbstractChannel:
+        """Connect to RabbitMQ with retry logic. Returns a channel."""
+        async with self.lock:
+            # Return existing connection if valid
+            if self.connection and not self.connection.is_closed:
+                if self.channel and not self.channel.is_closed:
+                    return self.channel
+
+            # Close stale connections
+            await self._close_internal()
+
+            # Connect with retries
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    logger.info(f"[{self.name}] Connecting (attempt {attempt}/{max_attempts})...")
+                    self.connection = await connect_robust(
+                        self.url,
+                        timeout=30,
+                        reconnect_interval=5,
+                    )
+                    self.channel = await self.connection.channel()
+                    logger.info(f"[{self.name}] Connected successfully")
+                    return self.channel
+                except Exception as e:
+                    logger.warning(f"[{self.name}] Connection failed: {e}")
+                    if attempt == max_attempts:
+                        raise
+                    await asyncio.sleep(retry_delay)
+
+    async def _close_internal(self):
+        """Close connection without lock (internal use)."""
+        if self.connection and not self.connection.is_closed:
+            try:
+                await self.connection.close()
+            except Exception:
+                pass
+        self.connection = None
+        self.channel = None
+
+    async def close(self):
+        """Close the connection."""
+        async with self.lock:
+            await self._close_internal()
+            logger.info(f"[{self.name}] Connection closed")
+
+    async def reset(self):
+        """Reset connection state (call after errors)."""
+        async with self.lock:
+            await self._close_internal()
+
+
 class AIEnrichmentConsumer:
     """
     Consumer for AI enrichment of job listings.
@@ -52,15 +129,14 @@ class AIEnrichmentConsumer:
         # Rate limiter for Ollama
         self.ollama_semaphore = asyncio.Semaphore(OLLAMA_RATE_LIMIT)
 
-        # Publisher connection (will be initialized in start())
-        self.publisher_connection = None
-        self.publisher_channel = None
-        self.enriched_exchange = None
-        self.publisher_lock = asyncio.Lock()
+        # Reusable connection manager for publishing
+        self.publisher = RobustRabbitMQ(RABBITMQ_URL, name="Publisher")
+        self.enriched_exchange: Optional[AbstractExchange] = None
 
         # Log configuration
+        safe_url = RABBITMQ_URL.split('@')[1] if '@' in RABBITMQ_URL else RABBITMQ_URL
         logger.info(f"[Helper Consumer] Configuration:")
-        logger.info(f"  - RabbitMQ URL: {RABBITMQ_URL.split('@')[1] if '@' in RABBITMQ_URL else RABBITMQ_URL}")
+        logger.info(f"  - RabbitMQ URL: {safe_url}")
         logger.info(f"  - Ollama URL: {self.ollama_client.base_url}")
         logger.info(f"  - Batch size: {ENRICHMENT_BATCH_SIZE}")
         logger.info(f"  - Ollama rate limit: {OLLAMA_RATE_LIMIT}")
@@ -106,11 +182,7 @@ class AIEnrichmentConsumer:
                 logger.error(f"Error in batch processor: {str(e)}", exc_info=True)
 
     async def _process_batch(self, messages: List[AbstractIncomingMessage]):
-        """
-        Process batch of raw jobs:
-        1. Enrich with Ollama AI
-        2. Publish to enriched_jobs queue
-        """
+        """Process batch of raw jobs with AI enrichment."""
         enrichment_tasks = [
             self._enrich_single_job(message)
             for message in messages
@@ -118,293 +190,190 @@ class AIEnrichmentConsumer:
 
         results = await asyncio.gather(*enrichment_tasks, return_exceptions=True)
 
-        # Log results
         success_count = sum(1 for r in results if r is True)
         failed_count = sum(1 for r in results if r is not True)
 
-        logger.info(
-            f"Batch processing complete: {success_count} succeeded, "
-            f"{failed_count} failed"
-        )
+        logger.info(f"Batch complete: {success_count} succeeded, {failed_count} failed")
 
     async def _enrich_single_job(self, message: AbstractIncomingMessage) -> bool:
-        """
-        Enrich a single job listing:
-        1. Parse message to get job data
-        2. Call Ollama for AI enrichment (with rate limiting)
-        3. Publish enriched result
-        4. Ack/nack message
-        """
+        """Enrich a single job listing."""
         try:
             start_time = datetime.now(timezone.utc)
             job_data = json.loads(message.body.decode())
 
-            logger.info(
-                f"[Helper] Enriching job: {job_data.get('company_title')} - "
-                f"{job_data.get('job_role')}"
-            )
-
-            # Debug: Log what data we have for enrichment
-            job_desc_len = len(job_data.get('job_description_full') or '')
-            full_text_len = len(job_data.get('full_page_text') or '')
-            logger.info(
-                f"[Helper] Job data received - "
-                f"job_description_full: {job_desc_len} chars, "
-                f"full_page_text: {full_text_len} chars"
-            )
+            logger.info(f"[Helper] Enriching: {job_data.get('company_title')} - {job_data.get('job_role')}")
 
             # AI enrichment (with rate limiting)
             ai_enrichment = {}
-            ai_start = datetime.now(timezone.utc)
             try:
-                logger.debug(f"[Helper] Acquiring Ollama semaphore for {job_data['posting_url']}")
                 async with self.ollama_semaphore:
-                    logger.info(f"[Helper] Starting AI enrichment for {job_data['posting_url']}")
                     ai_enrichment = await self.ollama_client.enrich_job_listing(job_data)
-                    ai_duration = (datetime.now(timezone.utc) - ai_start).total_seconds()
-                    logger.info(f"[Helper] AI enrichment completed in {ai_duration:.2f}s")
             except Exception as e:
-                logger.error(
-                    f"[Helper] AI enrichment failed for {job_data['posting_url']}: {str(e)}"
-                )
+                logger.error(f"[Helper] AI enrichment failed: {str(e)}")
                 ai_enrichment = {"error": str(e)}
 
-            # Combine job data with AI enrichment results
+            # Build final data
             end_time = datetime.now(timezone.utc)
             total_duration = int((end_time - start_time).total_seconds() * 1000)
-            enrichment_status = 'completed' if 'error' not in ai_enrichment else 'partial'
 
             final_data = {
-                **job_data,  # Original data
+                **job_data,
                 'ai_enrichment': ai_enrichment,
                 'enriched_at': end_time.isoformat(),
-                'enrichment_status': enrichment_status,
+                'enrichment_status': 'completed' if 'error' not in ai_enrichment else 'partial',
                 'processing_duration_ms': total_duration,
-                'enriched_by': 'helper-system'  # Mark as processed by helper
+                'enriched_by': 'helper-system'
             }
 
-            logger.info(
-                f"[Helper] Combined enrichment data for {job_data['posting_url']}: "
-                f"status={enrichment_status}, total_duration={total_duration}ms"
-            )
-
             # Publish to enriched_jobs queue
-            logger.debug(f"[Helper] Publishing to enriched_jobs queue: {job_data['posting_url']}")
-            await self._publish_to_enriched_queue(final_data)
-            logger.info(f"[Helper] Published to enriched_jobs queue: {job_data['posting_url']}")
+            await self._publish_with_retry(final_data)
 
-            # Ack message
             await message.ack()
-            logger.info(f"[Helper] Successfully enriched job: {job_data['posting_url']} (total: {total_duration}ms)")
+            logger.info(f"[Helper] Done: {job_data['posting_url']} ({total_duration}ms)")
             return True
 
         except Exception as e:
-            logger.error(
-                f"Enrichment failed: {str(e)}",
-                exc_info=True
-            )
+            logger.error(f"Enrichment failed: {str(e)}", exc_info=True)
             await self._handle_failed_message(message, str(e))
             return False
 
-    async def _ensure_publisher_connection(self):
-        """Ensure publisher connection and exchange are ready"""
-        from aio_pika import ExchangeType
+    async def _publish_with_retry(self, data: dict, max_retries: int = 3):
+        """Publish to enriched_jobs queue with retry logic."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Get/create connection and exchange
+                channel = await self.publisher.connect()
+                if not self.enriched_exchange or self.publisher.channel != channel:
+                    self.enriched_exchange = await channel.declare_exchange(
+                        ENRICHED_JOBS_EXCHANGE,
+                        ExchangeType.DIRECT,
+                        durable=True
+                    )
 
-        async with self.publisher_lock:
-            # Check if connection is still valid
-            if self.publisher_connection is not None and not self.publisher_connection.is_closed:
-                if self.publisher_channel is not None and not self.publisher_channel.is_closed:
-                    return  # Connection is good
+                message = Message(
+                    body=json.dumps(data).encode(),
+                    delivery_mode=DeliveryMode.PERSISTENT,
+                    content_type="application/json",
+                    headers={
+                        "source_job_id": data.get('id'),
+                        "posting_url": data['posting_url'],
+                        "enrichment_status": data.get('enrichment_status'),
+                        "enriched_by": "helper-system"
+                    }
+                )
 
-            # Create new connection
-            logger.info("[Helper] Establishing publisher connection...")
-            self.publisher_connection = await connect_robust(RABBITMQ_URL)
-            self.publisher_channel = await self.publisher_connection.channel()
+                await self.enriched_exchange.publish(message, routing_key=ENRICHED_JOBS_QUEUE)
+                return  # Success
 
-            # Declare exchange
-            self.enriched_exchange = await self.publisher_channel.declare_exchange(
-                ENRICHED_JOBS_EXCHANGE,
-                ExchangeType.DIRECT,
-                durable=True
-            )
-            logger.info("[Helper] Publisher connection established")
+            except Exception as e:
+                logger.warning(f"Publish failed (attempt {attempt}/{max_retries}): {e}")
+                await self.publisher.reset()
+                self.enriched_exchange = None
 
-    async def _publish_to_enriched_queue(self, data: dict):
-        """Publish enriched job to enriched_jobs queue"""
-        try:
-            # Ensure we have a valid connection
-            await self._ensure_publisher_connection()
-
-            message = Message(
-                body=json.dumps(data).encode(),
-                delivery_mode=DeliveryMode.PERSISTENT,
-                content_type="application/json",
-                headers={
-                    "source_job_id": data.get('id'),
-                    "posting_url": data['posting_url'],
-                    "enrichment_status": data.get('enrichment_status'),
-                    "enriched_by": "helper-system"
-                }
-            )
-
-            await self.enriched_exchange.publish(message, routing_key=ENRICHED_JOBS_QUEUE)
-            logger.debug(f"Published enriched job to queue: {data['posting_url']}")
-
-        except Exception as e:
-            logger.error(f"Failed to publish to enriched queue: {str(e)}")
-            # Reset connection so next attempt will reconnect
-            self.publisher_connection = None
-            self.publisher_channel = None
-            self.enriched_exchange = None
-            raise
+                if attempt < max_retries:
+                    await asyncio.sleep(2 * attempt)
+                else:
+                    raise
 
     async def _handle_failed_message(self, message: AbstractIncomingMessage, error: str):
-        """Handle failed message with retry logic"""
+        """Handle failed message with retry logic."""
         try:
             retry_count = message.headers.get('x-retry-count', 0) if message.headers else 0
             retry_count += 1
 
             if retry_count <= ENRICHMENT_MAX_RETRIES:
-                logger.warning(
-                    f"Requeuing message (attempt {retry_count}/{ENRICHMENT_MAX_RETRIES})"
-                )
-                # Update retry count and requeue
+                logger.warning(f"Requeuing (attempt {retry_count}/{ENRICHMENT_MAX_RETRIES})")
                 await message.nack(requeue=True)
             else:
-                logger.error(
-                    f"Max retries exceeded, sending to DLQ: {error}"
-                )
-                # Reject and send to DLQ
+                logger.error(f"Max retries exceeded, sending to DLQ: {error}")
                 await message.reject(requeue=False)
-
         except Exception as e:
-            logger.error(f"Error handling failed message: {str(e)}")
+            logger.error(f"Error handling failed message: {e}")
 
     async def start(self):
-        """Start the consumer"""
+        """Start the consumer with automatic reconnection."""
         self.running = True
         logger.info("=" * 60)
         logger.info("  HELPER SYSTEM - AI Enrichment Consumer")
         logger.info("=" * 60)
-        logger.info("")
 
         # Check Ollama health
         logger.info("Checking Ollama service health...")
         if await self.ollama_client.health_check():
             logger.info("Ollama service is healthy")
         else:
-            logger.warning("Ollama service health check failed - will retry on first job")
+            logger.warning("Ollama health check failed - will retry on first job")
 
-        # Connect to RabbitMQ with retry
-        # Mask password in URL for logging
-        safe_url = RABBITMQ_URL
-        if '@' in RABBITMQ_URL:
-            parts = RABBITMQ_URL.split('@')
-            safe_url = f"amqp://***:***@{parts[1]}"
+        # Create consumer connection manager
+        consumer_conn = RobustRabbitMQ(RABBITMQ_URL, name="Consumer")
 
-        logger.info(f"Connecting to remote RabbitMQ at: {safe_url}")
-        logger.info(f"(Full URL configured via RABBITMQ_URL environment variable)")
-
-        max_attempts = 30
-        for attempt in range(1, max_attempts + 1):
+        # Main loop with auto-reconnect
+        while self.running:
             try:
-                logger.info(f"Connection attempt {attempt}/{max_attempts}...")
-                connection = await connect_robust(RABBITMQ_URL)
-                logger.info("Successfully connected to RabbitMQ!")
-                break
+                channel = await consumer_conn.connect(max_attempts=30)
+                await channel.set_qos(prefetch_count=ENRICHMENT_BATCH_SIZE * 2)
+
+                queue = await channel.declare_queue(
+                    RAW_JOBS_QUEUE,
+                    durable=True,
+                    arguments={
+                        "x-dead-letter-exchange": "raw_jobs_dlx",
+                        "x-dead-letter-routing-key": RAW_JOBS_QUEUE,
+                    }
+                )
+
+                logger.info(f"Connected to queue: {RAW_JOBS_QUEUE}")
+                logger.info("=" * 60)
+                logger.info("  Ready to process jobs!")
+                logger.info("=" * 60)
+
+                # Start batch processor
+                batch_task = asyncio.create_task(self.batch_processor())
+
+                try:
+                    async with queue.iterator() as queue_iter:
+                        async for message in queue_iter:
+                            if not self.running:
+                                break
+                            await self.process_message(message)
+                finally:
+                    batch_task.cancel()
+                    try:
+                        await batch_task
+                    except asyncio.CancelledError:
+                        pass
+
             except Exception as e:
-                error_msg = str(e)
-                if "Connection refused" in error_msg:
-                    logger.error(f"Connection REFUSED - Is RabbitMQ running? Is the IP correct?")
-                    logger.error(f"Check: 1) Main system running  2) IP in .env  3) Firewall allows port 5672")
-                elif "timeout" in error_msg.lower():
-                    logger.error(f"Connection TIMEOUT - Network issue or wrong IP address")
-                elif "Authentication" in error_msg or "access" in error_msg.lower():
-                    logger.error(f"Authentication FAILED - Check username/password in RABBITMQ_URL")
+                if not self.running:
+                    break
+                logger.error(f"Connection lost: {e}")
+                logger.info("Reconnecting in 5 seconds...")
+                await consumer_conn.reset()
+                await self.publisher.reset()
+                self.enriched_exchange = None
+                await asyncio.sleep(5)
 
-                if attempt == max_attempts:
-                    logger.error("=" * 60)
-                    logger.error("  FAILED TO CONNECT TO RABBITMQ")
-                    logger.error("=" * 60)
-                    logger.error(f"URL: {safe_url}")
-                    logger.error(f"Error: {e}")
-                    logger.error("")
-                    logger.error("Troubleshooting:")
-                    logger.error("1. Check RABBITMQ_URL in your .env file")
-                    logger.error("2. Verify main system's IP address")
-                    logger.error("3. Ensure RabbitMQ is running on main system")
-                    logger.error("4. Check firewall allows port 5672")
-                    logger.error("5. Test: telnet <main-ip> 5672")
-                    logger.error("=" * 60)
-                    raise
-                logger.warning(f"RabbitMQ connection failed: {e}, retrying in 2s...")
-                await asyncio.sleep(2)
-
-        async with connection:
-            channel = await connection.channel()
-            await channel.set_qos(prefetch_count=ENRICHMENT_BATCH_SIZE * 2)
-
-            # Declare queue (idempotent - won't recreate if exists)
-            # Must match the main system's queue configuration
-            queue = await channel.declare_queue(
-                RAW_JOBS_QUEUE,
-                durable=True,
-                arguments={
-                    "x-dead-letter-exchange": "raw_jobs_dlx",
-                    "x-dead-letter-routing-key": RAW_JOBS_QUEUE,
-                }
-            )
-            logger.info(f"Connected to queue: {RAW_JOBS_QUEUE}")
-            logger.info("")
-            logger.info("=" * 60)
-            logger.info("  Ready to process jobs!")
-            logger.info("=" * 60)
-            logger.info("")
-
-            # Start batch processor
-            batch_processor_task = asyncio.create_task(self.batch_processor())
-
-            # Start consuming
-            async with queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    if not self.running:
-                        break
-                    await self.process_message(message)
-
-            # Cleanup
-            batch_processor_task.cancel()
-            try:
-                await batch_processor_task
-            except asyncio.CancelledError:
-                pass
-
-            # Close publisher connection
-            if self.publisher_connection and not self.publisher_connection.is_closed:
-                await self.publisher_connection.close()
-                logger.info("Publisher connection closed")
-
+        # Cleanup
+        await consumer_conn.close()
+        await self.publisher.close()
         logger.info("AI Enrichment Consumer stopped")
 
     def stop(self):
-        """Stop the consumer"""
+        """Stop the consumer."""
         logger.info("Stopping AI Enrichment Consumer...")
         self.running = False
 
 
-# Signal handlers for graceful shutdown
 def signal_handler(consumer):
     def handler(signum, frame):
-        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        logger.info(f"Received signal {signum}, shutting down...")
         consumer.stop()
         sys.exit(0)
     return handler
 
 
 async def main():
-    """Main entry point"""
     consumer = AIEnrichmentConsumer()
-
-    # Setup signal handlers
     signal.signal(signal.SIGINT, signal_handler(consumer))
     signal.signal(signal.SIGTERM, signal_handler(consumer))
 
@@ -414,7 +383,7 @@ async def main():
         logger.info("Keyboard interrupt received")
         consumer.stop()
     except Exception as e:
-        logger.error(f"Consumer error: {str(e)}", exc_info=True)
+        logger.error(f"Consumer error: {e}", exc_info=True)
         raise
 
 
