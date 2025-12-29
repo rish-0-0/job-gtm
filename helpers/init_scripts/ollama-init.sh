@@ -14,12 +14,16 @@ done
 
 echo "Ollama service is ready"
 
+# Model to use (can be overridden via OLLAMA_MODEL env var)
+MODEL="${OLLAMA_MODEL:-qwen2.5:7b}"
+echo "Target model: $MODEL"
+
 # Check if model is already pulled
-if ollama list | grep -q "llama3.2:3b"; then
-    echo "llama3.2:3b already exists"
+if ollama list | grep -q "$MODEL"; then
+    echo "$MODEL already exists"
 else
-    echo "Pulling llama3.2:3b model (this may take a few minutes)..."
-    ollama pull llama3.2:3b
+    echo "Pulling $MODEL model (this may take a few minutes)..."
+    ollama pull "$MODEL"
     echo "Model pulled successfully"
 fi
 

@@ -233,6 +233,7 @@ class GoldenJobConsumer:
         # Extract AI enrichment fields
         currency_norm = ai.get('currency_normalization', {})
         seniority = ai.get('seniority_level', {})
+        employment = ai.get('employment_type', {})
         work_arr = ai.get('work_arrangement', {})
         scam = ai.get('scam_detection', {})
         location = ai.get('location_normalization', {})
@@ -244,23 +245,37 @@ class GoldenJobConsumer:
 
         update = {}
 
-        # Location normalization
+        # Location normalization - always try to populate
         if location:
             city = self._clean_na(location.get('city'))
             state = self._clean_na(location.get('state'))
             country = self._clean_na(location.get('country'))
             timezone_str = self._clean_na(location.get('timezone'))
+            is_remote = self._safe_bool(location.get('is_remote'), False)
+
+            # Try to infer country from state abbreviations if not provided
+            if not country and state:
+                if len(state) == 2 and state.upper() in ['CA', 'TX', 'NY', 'WA', 'FL', 'IL', 'MA', 'CO', 'AZ', 'GA', 'NC', 'VA', 'PA', 'OH', 'MI', 'NJ', 'OR', 'MN', 'MD', 'UT']:
+                    country = 'United States'
+                elif len(state) == 2 and state.upper() in ['ON', 'BC', 'AB', 'QC']:
+                    country = 'Canada'
 
             # Build normalized location string
             location_parts = [p for p in [city, state, country] if p]
-            if location_parts:
+            if is_remote:
+                # Remote jobs: show "Remote" or "Remote - City, Country"
+                if location_parts:
+                    update['job_location_normalized'] = self._truncate(f"Remote - {', '.join(location_parts)}", 255)
+                else:
+                    update['job_location_normalized'] = 'Remote'
+            elif location_parts:
                 update['job_location_normalized'] = self._truncate(', '.join(location_parts), 255)
 
             update['location_city'] = self._truncate(city, 100) if city else None
             update['location_state'] = self._truncate(state, 100) if state else None
             update['location_country'] = self._truncate(country, 100) if country else None
             update['location_timezone'] = self._truncate(timezone_str, 50) if timezone_str else None
-            update['is_remote'] = self._safe_bool(location.get('is_remote'), False)
+            update['is_remote'] = is_remote
 
         # Salary normalization
         if currency_norm:
@@ -272,18 +287,27 @@ class GoldenJobConsumer:
             if conversion_rate:
                 update['currency_conversion_date'] = datetime.now(timezone.utc)
 
-        # Seniority normalization - always set even if N/A
+        # Seniority normalization - always set
         if seniority:
             normalized_seniority = self._clean_na(seniority.get('normalized'))
-            update['seniority_level_normalized'] = self._truncate(normalized_seniority or 'N/A', 50)
+            # Default to Mid if not specified (most common)
+            update['seniority_level_normalized'] = self._truncate(normalized_seniority or 'Mid', 50)
             update['seniority_confidence_score'] = self._safe_number(seniority.get('confidence'))
 
-        # Work arrangement - always set even if N/A
+        # Employment type normalization - always set
+        if employment:
+            normalized_employment = self._clean_na(employment.get('normalized'))
+            # Default to Full-time if not specified (most common)
+            update['employment_type_normalized'] = self._truncate(normalized_employment or 'Full-time', 100)
+
+        # Work arrangement - always set
         if work_arr:
             normalized_work = self._clean_na(work_arr.get('normalized'))
-            update['work_arrangement_normalized'] = self._truncate(normalized_work or 'N/A', 50)
+            # Default to On-site if not specified (most common default)
+            update['work_arrangement_normalized'] = self._truncate(normalized_work or 'On-site', 50)
             details = self._clean_na(work_arr.get('details'))
-            update['work_arrangement_raw'] = self._truncate(details or 'N/A', 100)
+            if details:
+                update['work_arrangement_raw'] = self._truncate(details, 100)
 
         # Scam detection
         if scam:
