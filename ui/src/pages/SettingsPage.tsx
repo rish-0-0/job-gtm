@@ -1,9 +1,9 @@
-import { RefreshCw, Database } from 'lucide-react'
+import { RefreshCw, Database, Sparkles, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
-import { useRefreshMaterializedView, useRefreshStatus } from '@/api/workflows'
-import { useState } from 'react'
+import { useRefreshMaterializedView, useRefreshStatus, useTriggerEnrichment } from '@/api/workflows'
+import { useState, useRef, useCallback } from 'react'
 
 const MATERIALIZED_VIEWS = [
   {
@@ -13,10 +13,15 @@ const MATERIALIZED_VIEWS = [
   },
 ]
 
+const DEBOUNCE_MS = 2000
+
 function SettingsPage() {
   const { toast } = useToast()
   const refreshMutation = useRefreshMaterializedView()
+  const enrichmentMutation = useTriggerEnrichment()
   const [refreshingView, setRefreshingView] = useState<string | null>(null)
+  const [isEnrichmentDebounced, setIsEnrichmentDebounced] = useState(false)
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const { data: statusData } = useRefreshStatus(
     refreshingView || 'mv_root_data',
@@ -65,6 +70,49 @@ function SettingsPage() {
   const isRefreshing = (viewName: string) => {
     return refreshingView === viewName && statusData?.status === 'running'
   }
+
+  const handleTriggerEnrichment = useCallback(async () => {
+    if (isEnrichmentDebounced || enrichmentMutation.isPending) {
+      return
+    }
+
+    // Set debounce state
+    setIsEnrichmentDebounced(true)
+
+    // Clear any existing timer
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current)
+    }
+
+    // Set timer to reset debounce
+    debounceTimerRef.current = setTimeout(() => {
+      setIsEnrichmentDebounced(false)
+    }, DEBOUNCE_MS)
+
+    try {
+      const result = await enrichmentMutation.mutateAsync()
+
+      if (result.status === 'already_running') {
+        toast({
+          title: 'Enrichment Already Running',
+          description: result.message,
+          variant: 'default',
+        })
+      } else {
+        toast({
+          title: 'Enrichment Pipeline Triggered',
+          description: result.message || 'AI enrichment workflow has been started.',
+          variant: 'success',
+        })
+      }
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to trigger enrichment',
+        variant: 'destructive',
+      })
+    }
+  }, [isEnrichmentDebounced, enrichmentMutation, toast])
 
   return (
     <>
@@ -117,16 +165,33 @@ function SettingsPage() {
 
         <Card className="bg-card border-border">
           <CardHeader>
-            <CardTitle className="text-card-foreground">Workflows</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-card-foreground">
+              <Sparkles className="h-5 w-5" />
+              AI Enrichment Pipeline
+            </CardTitle>
             <CardDescription>
-              Coming soon: View and manage running Temporal workflows.
+              Trigger the AI enrichment pipeline to process pending job listings.
+              The pipeline uses Ollama to extract and normalize job data.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">
-              This section will show active workflows, their status, and allow you to monitor
-              long-running processes like enrichment and scraping jobs.
-            </p>
+            <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50 border border-border">
+              <div>
+                <h4 className="font-medium text-foreground">Enrichment Workflow</h4>
+                <p className="text-sm text-muted-foreground">
+                  Process scraped jobs through AI to extract skills, normalize locations, detect scams, and more.
+                </p>
+              </div>
+              <Button
+                onClick={handleTriggerEnrichment}
+                disabled={enrichmentMutation.isPending || isEnrichmentDebounced}
+                variant="default"
+                size="sm"
+              >
+                <Play className="h-4 w-4 mr-2" />
+                {enrichmentMutation.isPending ? 'Triggering...' : 'Trigger Enrichment'}
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>

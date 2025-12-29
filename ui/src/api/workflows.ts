@@ -18,6 +18,12 @@ interface AvailableViewsResponse {
   views: string[]
 }
 
+interface TriggerEnrichmentResponse {
+  status: 'started' | 'already_running'
+  message: string
+  workflow_id?: string
+}
+
 export async function refreshMaterializedView(viewName: string): Promise<RefreshViewResponse> {
   const response = await apiClient.post<RefreshViewResponse>('/workflows/views/refresh', {
     view_name: viewName,
@@ -63,5 +69,16 @@ export function useRefreshStatus(viewName: string, enabled: boolean = true) {
 export function useRefreshMaterializedView() {
   return useMutation({
     mutationFn: refreshMaterializedView,
+  })
+}
+
+export async function triggerEnrichment(): Promise<TriggerEnrichmentResponse> {
+  const response = await apiClient.post<TriggerEnrichmentResponse>('/workflows/enrich/trigger')
+  return response.data
+}
+
+export function useTriggerEnrichment() {
+  return useMutation({
+    mutationFn: triggerEnrichment,
   })
 }

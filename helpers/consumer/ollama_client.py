@@ -70,12 +70,12 @@ class OllamaClient:
         self.base_url = base_url or os.getenv("OLLAMA_URL", "http://ollama:11434")
         self.model = model or os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
         self.timeout = httpx.Timeout(
-            connect=30.0,    # 30s to establish connection
-            read=300.0,      # 5 minutes to read response (LLM can be slow)
+            connect=60.0,    # 60s to establish connection (model loading can be slow)
+            read=600.0,      # 10 minutes to read response (larger models need more time)
             write=30.0,      # 30s to send request
-            pool=30.0        # 30s to acquire connection from pool
+            pool=60.0        # 60s to acquire connection from pool
         )
-        self.max_retries = 2
+        self.max_retries = 3
 
     async def enrich_job_listing(self, job_data: dict) -> dict:
         """
@@ -363,7 +363,10 @@ Return ONLY the JSON object."""
                 last_error = e
                 logger.warning(f"[Ollama API] Timeout on attempt {attempt}/{self.max_retries}: {str(e)}")
                 if attempt < self.max_retries:
-                    await asyncio.sleep(2)  # Wait before retry
+                    # Wait longer between retries - model may be loading
+                    wait_time = 5 * attempt  # 5s, 10s, 15s...
+                    logger.info(f"[Ollama API] Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
                     continue
                 logger.error(f"[Ollama API] All retries exhausted - timeout")
                 raise Exception(f"Ollama API timeout after {self.max_retries} attempts")
@@ -372,7 +375,8 @@ Return ONLY the JSON object."""
                 last_error = e
                 logger.warning(f"[Ollama API] HTTP error on attempt {attempt}/{self.max_retries}: {str(e)}")
                 if attempt < self.max_retries:
-                    await asyncio.sleep(2)
+                    wait_time = 5 * attempt
+                    await asyncio.sleep(wait_time)
                     continue
                 logger.error(f"[Ollama API] All retries exhausted - HTTP error: {str(e)}")
                 raise Exception(f"Ollama API error: {str(e)}")
@@ -381,7 +385,8 @@ Return ONLY the JSON object."""
                 last_error = e
                 logger.error(f"[Ollama API] Call failed on attempt {attempt}: {str(e)}", exc_info=True)
                 if attempt < self.max_retries:
-                    await asyncio.sleep(2)
+                    wait_time = 5 * attempt
+                    await asyncio.sleep(wait_time)
                     continue
                 raise
 

@@ -12,6 +12,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/api/workflows': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
       '/api': {
         target: 'http://localhost:8001',
         changeOrigin: true,
