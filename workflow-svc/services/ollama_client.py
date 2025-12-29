@@ -4,11 +4,61 @@ Ollama API client for job listing enrichment
 import json
 import logging
 import os
-from typing import Dict, Any, Optional
+import re
+from typing import Dict, Any, Optional, Union
 import httpx
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def strip_html_tags(text: str) -> str:
+    """Remove HTML/XML tags and clean up the text"""
+    if not text:
+        return text
+
+    # Remove HTML comments
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+
+    # Remove script and style elements entirely
+    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Replace common block elements with newlines
+    text = re.sub(r'<(?:br|p|div|h[1-6]|li|tr)[^>]*/?>', '\n', text, flags=re.IGNORECASE)
+
+    # Remove all remaining HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Decode common HTML entities
+    html_entities = {
+        '&nbsp;': ' ',
+        '&amp;': '&',
+        '&lt;': '<',
+        '&gt;': '>',
+        '&quot;': '"',
+        '&#39;': "'",
+        '&apos;': "'",
+        '&ndash;': '-',
+        '&mdash;': '-',
+        '&bull;': '•',
+        '&copy;': '©',
+        '&reg;': '®',
+        '&trade;': '™',
+    }
+    for entity, char in html_entities.items():
+        text = text.replace(entity, char)
+
+    # Remove numeric HTML entities
+    text = re.sub(r'&#\d+;', '', text)
+    text = re.sub(r'&#x[0-9a-fA-F]+;', '', text)
+
+    # Clean up whitespace
+    text = re.sub(r'\n\s*\n+', '\n\n', text)  # Multiple newlines to double newline
+    text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces to single space
+    text = '\n'.join(line.strip() for line in text.split('\n'))  # Strip each line
+
+    return text.strip()
 
 
 class OllamaClient:
@@ -106,143 +156,162 @@ class OllamaClient:
             job_data.get('job_description') or
             'N/A'
         )
+        # Clean HTML from job description
+        job_description = strip_html_tags(job_description)
         # Truncate if too long but keep more context
         if len(job_description) > 3000:
             job_description = job_description[:3000] + "..."
 
         about_company = job_data.get('about_company') or job_data.get('about_company_raw') or 'N/A'
+        # Clean HTML from about company
+        about_company = strip_html_tags(about_company)
         if len(about_company) > 1000:
             about_company = about_company[:1000] + "..."
 
-        prompt = f"""You are a job listing analysis expert. Analyze the following job listing THOROUGHLY and extract ALL available information. You MUST provide a value for EVERY field - use "N/A" for strings or 0 for numbers if information is not available.
+        # Clean other text fields
+        company_title = strip_html_tags(job_data.get('company_title') or 'N/A')
+        job_role = strip_html_tags(job_data.get('job_role') or 'N/A')
+        job_location = strip_html_tags(job_data.get('job_location') or job_data.get('job_location_raw') or 'N/A')
+        salary_range = strip_html_tags(job_data.get('salary_range') or job_data.get('salary_range_raw') or 'N/A')
 
-=== JOB LISTING DATA ===
-Company: {job_data.get('company_title') or 'N/A'}
-Job Title/Role: {job_data.get('job_role') or 'N/A'}
-Location (Raw): {job_data.get('job_location') or job_data.get('job_location_raw') or 'N/A'}
-Salary Range: {job_data.get('salary_range') or job_data.get('salary_range_raw') or 'N/A'}
-Min Salary: {job_data.get('min_salary') or job_data.get('min_salary_raw') or 'N/A'}
-Max Salary: {job_data.get('max_salary') or job_data.get('max_salary_raw') or 'N/A'}
-Employment Type: {job_data.get('employment_type') or job_data.get('employment_type_raw') or 'N/A'}
-Experience Required: {job_data.get('required_experience') or 'N/A'}
-Seniority Level (Raw): {job_data.get('seniority_level') or job_data.get('seniority_level_raw') or 'N/A'}
-Date Posted: {job_data.get('date_posted') or 'N/A'}
+        prompt = f"""You are a job listing analysis expert. Your task is to FULLY populate ALL fields by analyzing the job listing and making intelligent inferences.
+
+CRITICAL RULES:
+1. Return ONLY valid JSON - no markdown, no code blocks, no explanations
+2. NEVER use "N/A" if you can make a reasonable inference - ALWAYS TRY TO INFER
+3. NEVER include HTML tags in output - plain text only
+4. You MUST fill every field - use context clues, common patterns, and logical deduction
+
+=== JOB LISTING ===
+Company: {company_title}
+Job Title: {job_role}
+Location: {job_location}
+Salary: {salary_range}
+Employment Type: {strip_html_tags(job_data.get('employment_type') or job_data.get('employment_type_raw') or 'N/A')}
+Experience: {strip_html_tags(job_data.get('required_experience') or 'N/A')}
 
 About Company:
 {about_company}
 
-Full Job Description:
+Job Description:
 {job_description}
 
-=== ANALYSIS INSTRUCTIONS ===
-Analyze the job listing above and provide COMPLETE structured data. DO NOT leave fields empty or null.
+=== INFERENCE GUIDELINES ===
 
-CRITICAL RULES:
-1. EVERY string field MUST have a value - use "N/A" if information is not available
-2. EVERY number field MUST have a value - use 0 if not available
-3. EVERY boolean field MUST be true or false - make your best inference
-4. EVERY array field MUST have at least one item - use ["N/A"] if nothing found
-5. Extract ALL skills, technologies, and requirements mentioned in the description
-6. Infer seniority from job title, requirements, and experience needed
-7. Infer work arrangement from location, description, and any remote/hybrid mentions
-8. Look for salary clues even if not explicitly stated (e.g., "competitive", market rates)
+LOCATION: Determine the country when possible. Use these rules:
+- City names → look up country (e.g., "Bangalore" = India, "Austin" = USA, "London" = UK)
+- State abbreviations → country (e.g., "CA", "TX", "NY" = USA; "ON", "BC" = Canada)
+- If only city given, infer state/country from common knowledge
+- Company HQ location can hint at job location
+- For remote jobs with no specific location, leave city/state/country empty but set is_remote=true
+
+SENIORITY: You MUST determine seniority level. Use these rules:
+- Job title keywords: "Senior", "Sr.", "Lead", "Principal", "Staff", "Junior", "Jr.", "Entry", "Associate"
+- Years of experience: 0-2 = Entry/Junior, 2-5 = Mid, 5-8 = Senior, 8+ = Lead/Principal
+- If no years stated but responsibilities are complex = Mid or Senior
+- Management titles = Lead or Executive
+- Default for ambiguous roles = Mid
+
+EMPLOYMENT TYPE: You MUST classify. Use these rules:
+- Look for: "full-time", "part-time", "contract", "freelance", "internship", "temporary"
+- Most jobs without specification = Full-time
+- "Contract" or "C2C" = Contract
+- Student/intern language = Internship
+
+WORK ARRANGEMENT: You MUST classify. Use these rules:
+- Keywords: "remote", "work from home", "WFH", "distributed" = Remote
+- Keywords: "hybrid", "flexible", "2-3 days" = Hybrid
+- Physical address without remote mention = On-site
+- No mention at all = infer On-site (most common default)
+
+INDUSTRY: Infer from company name, description, or job context
+COMPANY SIZE: Infer from funding stage, team size mentions, or company description
 
 Return this EXACT JSON structure with ALL fields populated:
 
 {{
   "currency_normalization": {{
-    "detected_currency": "<USD|EUR|GBP|INR|CAD|AUD|SGD|N/A>",
-    "min_salary_usd": <number or 0 if unknown>,
-    "max_salary_usd": <number or 0 if unknown>,
-    "conversion_rate": <number or 1.0>,
-    "confidence": <0.0-1.0>
+    "detected_currency": "USD|EUR|GBP|INR|CAD|AUD|SGD",
+    "min_salary_usd": 0,
+    "max_salary_usd": 0,
+    "conversion_rate": 1.0,
+    "confidence": 0.0
   }},
   "seniority_level": {{
-    "normalized": "<Entry|Junior|Mid|Senior|Lead|Principal|Staff|Executive|N/A>",
-    "confidence": <0.0-1.0>,
-    "reasoning": "<explain how you determined seniority - REQUIRED>"
+    "normalized": "Entry|Junior|Mid|Senior|Lead|Principal|Staff|Executive",
+    "confidence": 0.8,
+    "reasoning": "Brief explanation"
+  }},
+  "employment_type": {{
+    "normalized": "Full-time|Part-time|Contract|Internship|Temporary|Freelance",
+    "confidence": 0.9,
+    "reasoning": "Brief explanation"
   }},
   "work_arrangement": {{
-    "normalized": "<On-site|Remote|Hybrid|N/A>",
-    "confidence": <0.0-1.0>,
-    "details": "<explain work arrangement details - REQUIRED>"
+    "normalized": "On-site|Remote|Hybrid",
+    "confidence": 0.8,
+    "details": "Brief explanation"
   }},
   "scam_detection": {{
-    "score": <0-100, 0=legitimate, 100=definite scam>,
-    "indicators": ["<list any red flags, or 'None detected'>"],
-    "is_likely_scam": <true|false>,
-    "reasoning": "<explain your scam assessment - REQUIRED>"
+    "score": 0,
+    "indicators": [],
+    "is_likely_scam": false,
+    "reasoning": "Brief explanation"
   }},
   "skills_extraction": {{
     "skills": [
-      {{"skill": "<raw skill>", "normalized": "<standardized name>", "category": "<Frontend|Backend|Database|DevOps|Cloud|Mobile|AI/ML|Data|Security|Management|Soft Skills|Other>", "experience": "<years or N/A>"}}
+      {{"skill": "raw skill", "normalized": "standardized", "category": "Backend|Frontend|Database|DevOps|Cloud|Mobile|AI/ML|Data|Security|Management|Soft Skills|Other", "experience": "years or N/A"}}
     ]
   }},
   "tech_stack": {{
-    "technologies": ["<list all technologies, frameworks, languages mentioned>"],
-    "frameworks": ["<specific frameworks>"],
-    "tools": ["<tools, platforms, services>"],
-    "databases": ["<any databases mentioned>"],
-    "cloud": ["<cloud platforms: AWS, GCP, Azure, etc.>"]
+    "technologies": [],
+    "frameworks": [],
+    "tools": [],
+    "databases": [],
+    "cloud": []
   }},
   "location_normalization": {{
-    "city": "<city name or N/A>",
-    "state": "<state/province or N/A>",
-    "country": "<country name or N/A>",
-    "timezone": "<timezone like UTC+5:30, PST, EST or N/A>",
-    "is_remote": <true|false>,
-    "location_type": "<Single Location|Multiple Locations|Global|N/A>"
+    "city": "City name",
+    "state": "State/Province",
+    "country": "Country name - REQUIRED, ALWAYS INFER",
+    "timezone": "Timezone",
+    "is_remote": false,
+    "location_type": "Single Location|Multiple Locations|Global"
   }},
   "company_insights": {{
-    "industry": "<Technology|Finance|Healthcare|E-commerce|Education|Manufacturing|Consulting|Other>",
-    "company_size": "<Startup (1-50)|Small (51-200)|Medium (201-1000)|Large (1001-5000)|Enterprise (5000+)|N/A>",
-    "funding_stage": "<Seed|Series A|Series B|Series C+|Public|Bootstrapped|N/A>",
-    "notable_info": "<any interesting company facts, culture, mission - REQUIRED>"
+    "industry": "Technology|Finance|Healthcare|E-commerce|Education|Manufacturing|Consulting|Retail|Media|Other",
+    "company_size": "Startup (1-50)|Small (51-200)|Medium (201-1000)|Large (1001-5000)|Enterprise (5000+)",
+    "funding_stage": "Seed|Series A|Series B|Series C+|Public|Bootstrapped",
+    "notable_info": "Key company facts"
   }},
   "benefits": {{
-    "has_stock_options": <true|false>,
-    "stock_details": "<equity/RSU details or N/A>",
-    "has_health_insurance": <true|false>,
-    "has_retirement_plan": <true|false>,
-    "has_flexible_hours": <true|false>,
-    "has_learning_budget": <true|false>,
-    "pto_days": <number or 0>,
-    "other_benefits": ["<list all other benefits mentioned>"]
+    "has_stock_options": false,
+    "stock_details": "",
+    "has_health_insurance": false,
+    "has_retirement_plan": false,
+    "has_flexible_hours": false,
+    "has_learning_budget": false,
+    "pto_days": 0,
+    "other_benefits": []
   }},
   "role_classification": {{
-    "primary_role": "<Software Engineer|Frontend Developer|Backend Developer|Full Stack Developer|DevOps Engineer|Data Scientist|Data Engineer|ML Engineer|Product Manager|Engineering Manager|QA Engineer|Security Engineer|Mobile Developer|Cloud Engineer|Other>",
-    "role_category": "<Engineering|Product|Design|Data|Management|Operations|Security|Other>",
-    "is_management": <true|false>,
-    "team_size": "<number of reports if management, else 0>",
-    "department": "<Engineering|Product|Data|Infrastructure|Security|Other|N/A>"
+    "primary_role": "Software Engineer|Frontend Developer|Backend Developer|Full Stack Developer|DevOps Engineer|Data Scientist|Data Engineer|ML Engineer|Product Manager|Engineering Manager|QA Engineer|Security Engineer|Mobile Developer|Cloud Engineer|Other",
+    "role_category": "Engineering|Product|Design|Data|Management|Operations|Security|Other",
+    "is_management": false,
+    "team_size": 0,
+    "department": "Engineering|Product|Data|Infrastructure|Security|Other"
   }},
   "job_quality_score": {{
-    "overall_score": <1-10>,
-    "description_quality": <1-10>,
-    "salary_transparency": <1-10>,
-    "requirements_clarity": <1-10>
+    "overall_score": 5,
+    "description_quality": 5,
+    "salary_transparency": 1,
+    "requirements_clarity": 5
   }}
 }}
 
-CURRENCY CONVERSION RATES (approximate):
-- INR to USD: 0.012
-- EUR to USD: 1.08
-- GBP to USD: 1.27
-- CAD to USD: 0.74
-- AUD to USD: 0.65
-- SGD to USD: 0.74
+CURRENCY RATES: INR=0.012, EUR=1.08, GBP=1.27, CAD=0.74, AUD=0.65, SGD=0.74
 
-TECHNOLOGY NORMALIZATION:
-- ReactJS, React.js → React
-- NodeJS, Node → Node.js
-- Postgres, PostgresSQL → PostgreSQL
-- JS → JavaScript
-- TS → TypeScript
-- K8s → Kubernetes
-- AWS, Amazon Web Services → AWS
-- GCP, Google Cloud → Google Cloud Platform
-
-Return ONLY the JSON object, no markdown code blocks, no explanations before or after."""
+Return ONLY the JSON object."""
         return prompt
 
     async def _call_ollama(self, prompt: str) -> dict:
@@ -318,6 +387,26 @@ Return ONLY the JSON object, no markdown code blocks, no explanations before or 
 
         raise Exception(f"Ollama API failed after {self.max_retries} attempts: {str(last_error)}")
 
+    def _clean_enriched_data(self, data: Any) -> Any:
+        """
+        Recursively clean HTML tags from all string values in the enriched data
+        """
+        if isinstance(data, dict):
+            return {k: self._clean_enriched_data(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._clean_enriched_data(item) for item in data]
+        elif isinstance(data, str):
+            # Remove any HTML/XML tags from string values
+            cleaned = re.sub(r'<[^>]+>', '', data)
+            # Also clean up any escaped HTML entities that might remain
+            cleaned = cleaned.replace('&lt;', '<').replace('&gt;', '>')
+            cleaned = cleaned.replace('&amp;', '&').replace('&quot;', '"')
+            # Remove the angle brackets we just unescaped if they look like tags
+            cleaned = re.sub(r'<[^>]+>', '', cleaned)
+            return cleaned.strip()
+        else:
+            return data
+
     def _parse_enrichment_response(self, response: dict) -> dict:
         """
         Parse Ollama response into structured format
@@ -362,10 +451,14 @@ Return ONLY the JSON object, no markdown code blocks, no explanations before or 
                     "raw_response": response_text[:500]
                 }
 
+            # Clean any HTML tags from all string values in the response
+            enriched_data = self._clean_enriched_data(enriched_data)
+
             # Validate that we have the expected structure
             expected_keys = [
                 "currency_normalization",
                 "seniority_level",
+                "employment_type",
                 "work_arrangement",
                 "scam_detection",
                 "skills_extraction",

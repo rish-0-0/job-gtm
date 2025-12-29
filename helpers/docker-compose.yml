@@ -35,6 +35,7 @@ services:
       - ./init_scripts:/scripts
     environment:
       - OLLAMA_HOST=ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
     entrypoint: ["/bin/sh", "-c", "sed -i 's/\\r$//' /scripts/ollama-init.sh && /bin/sh /scripts/ollama-init.sh"]
     restart: "no"
 
@@ -51,6 +52,7 @@ services:
     environment:
       - RABBITMQ_URL=${RABBITMQ_URL}
       - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
       - ENRICHMENT_BATCH_SIZE=${ENRICHMENT_BATCH_SIZE:-20}
       - OLLAMA_RATE_LIMIT=${OLLAMA_RATE_LIMIT:-8}
       - PYTHONUNBUFFERED=1
