@@ -332,6 +332,7 @@ Return ONLY the JSON object."""
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "format": "json",  # Force JSON output format
             "options": {
                 "temperature": 0.2,  # Lower temperature for more consistent JSON output
                 "num_predict": 4096,  # Max tokens to generate (increased for detailed response)
@@ -427,7 +428,11 @@ Return ONLY the JSON object."""
             response_text = response.get("response", "")
 
             if not response_text:
+                logger.error(f"[Ollama Parser] Empty response from Ollama. Full response: {response}")
                 raise ValueError("Empty response from Ollama")
+
+            logger.debug(f"[Ollama Parser] Raw response length: {len(response_text)} chars")
+            logger.debug(f"[Ollama Parser] Response preview (first 200 chars): {response_text[:200]}")
 
             # Try to extract JSON from the response
             # Sometimes the model wraps JSON in markdown code blocks
@@ -448,12 +453,14 @@ Return ONLY the JSON object."""
                 enriched_data = json.loads(response_text)
                 logger.debug(f"[Ollama Parser] Successfully parsed JSON response")
             except json.JSONDecodeError as e:
-                logger.error(f"[Ollama Parser] Failed to parse JSON: {str(e)}")
-                logger.error(f"[Ollama Parser] Response text (first 500 chars): {response_text[:500]}")
+                logger.error(f"[Ollama Parser] JSON decode error at position {e.pos}: {e.msg}")
+                logger.error(f"[Ollama Parser] Failed line: {e.doc[max(0, e.pos-50):e.pos+50]}")
+                logger.error(f"[Ollama Parser] Full response text (first 1000 chars):\n{response_text[:1000]}")
                 # Return a minimal structure with error info
                 return {
-                    "error": "Failed to parse Ollama response",
-                    "raw_response": response_text[:500]
+                    "error": f"JSON parsing failed: {e.msg} at position {e.pos}",
+                    "error_detail": str(e),
+                    "raw_response_preview": response_text[:500]
                 }
 
             # Clean any HTML tags from all string values in the response
