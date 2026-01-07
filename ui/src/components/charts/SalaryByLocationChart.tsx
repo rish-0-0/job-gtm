@@ -38,8 +38,8 @@ type MetricKey = 'avgMinSalary' | 'avgMaxSalary'
 export function SalaryByLocationChart({
   data,
   isLoading,
-  title = 'Average Salary by Country',
-  description = 'Top countries by average minimum salary',
+  title = 'Average Salary by Location',
+  description = 'Top locations by average minimum salary',
 }: SalaryByLocationChartProps) {
   const [activeMetric, setActiveMetric] = useState<MetricKey>('avgMinSalary')
 
@@ -128,7 +128,7 @@ export function SalaryByLocationChart({
                 {formatCurrency(total[key])}
               </span>
               <span className="text-xs text-muted-foreground">
-                avg across {data.length} countries
+                avg across {data.length} locations
               </span>
             </button>
           ))}
