@@ -57,7 +57,6 @@ export function ResultTable({ data }: ResultTableProps) {
       field: col,
       headerName: formatColumnHeader(col),
       sortable: true,
-      filter: true,
       resizable: true,
       valueFormatter: getValueFormatter(col),
     }))

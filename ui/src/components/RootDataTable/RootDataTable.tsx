@@ -83,7 +83,6 @@ const RootDataTable = forwardRef<AgGridReact, RootDataTableProps>(
         width: COLUMN_WIDTHS[col] || 120,
         sortable: !grouped, // Disable sorting when grouped (server handles it)
         resizable: true,
-        filter: !grouped,
       }
 
       // Apply formatters based on column type
@@ -103,7 +102,6 @@ const RootDataTable = forwardRef<AgGridReact, RootDataTableProps>(
     () => ({
       sortable: !grouped,
       resizable: true,
-      filter: !grouped,
     }),
     [grouped]
   )
