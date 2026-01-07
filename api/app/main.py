@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import root_data, workflows, custom_views
+from app.routers import root_data, workflows, custom_views, nl_query
 
 app = FastAPI(
     title="Job GTM Dashboard API",
-    description="API for job listings dashboard",
-    version="0.1.0",
+    description="API for job listings dashboard with natural language query support",
+    version="0.2.0",
 )
 
 # CORS middleware for frontend
@@ -22,6 +22,7 @@ app.add_middleware(
 app.include_router(root_data.router, prefix="/api", tags=["root-data"])
 app.include_router(workflows.router, prefix="/api/workflows", tags=["workflows"])
 app.include_router(custom_views.router, prefix="/api/views", tags=["custom-views"])
+app.include_router(nl_query.router, prefix="/api/nl-query", tags=["natural-language-query"])
 
 
 @app.get("/")

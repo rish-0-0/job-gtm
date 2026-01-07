@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { Database, Settings, Table2, Trash2, Loader2 } from 'lucide-react'
+import { Database, Settings, Table2, Trash2, Loader2, MessageCircle } from 'lucide-react'
 import { useCustomViews, useDeleteView } from '../../api/customViews'
 import { useToast } from '../../hooks/use-toast'
 import { Button } from '../ui/button'
@@ -58,6 +58,22 @@ function Sidebar() {
             >
               <Database className="inline-block w-4 h-4 mr-2" />
               Root Data
+            </NavLink>
+          </li>
+
+          {/* Search Section */}
+          <li className="sidebar-section">
+            <span className="sidebar-section-title">Search</span>
+          </li>
+          <li>
+            <NavLink
+              to="/chat"
+              className={({ isActive }) =>
+                `sidebar-nav-item ${isActive ? 'active' : ''}`
+              }
+            >
+              <MessageCircle className="inline-block w-4 h-4 mr-2" />
+              Chat
             </NavLink>
           </li>
 

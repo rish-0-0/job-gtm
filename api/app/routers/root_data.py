@@ -234,21 +234,21 @@ def get_salary_by_location(
     db: Session = Depends(get_db),
 ):
     """
-    Get average minimum salary grouped by location country.
+    Get average minimum salary grouped by job location.
     Returns top locations by average salary for chart visualization.
     """
     query = text("""
         SELECT
-            location_country,
+            job_location_normalized,
             ROUND(AVG(min_salary_usd)::numeric, 0) as avg_min_salary,
             ROUND(AVG(max_salary_usd)::numeric, 0) as avg_max_salary,
             COUNT(*) as job_count
         FROM mv_root_data
         WHERE min_salary_usd IS NOT NULL
           AND min_salary_usd > 0
-          AND location_country IS NOT NULL
-          AND location_country != ''
-        GROUP BY location_country
+          AND job_location_normalized IS NOT NULL
+          AND job_location_normalized != ''
+        GROUP BY job_location_normalized
         HAVING COUNT(*) >= 5
         ORDER BY AVG(min_salary_usd) DESC
         LIMIT :limit
@@ -260,7 +260,7 @@ def get_salary_by_location(
     data = []
     for row in rows:
         data.append({
-            "location": row.location_country,
+            "location": row.job_location_normalized,
             "avgMinSalary": int(row.avg_min_salary) if row.avg_min_salary else 0,
             "avgMaxSalary": int(row.avg_max_salary) if row.avg_max_salary else 0,
             "jobCount": row.job_count,
@@ -269,5 +269,5 @@ def get_salary_by_location(
     return {
         "data": data,
         "metric": "avg_min_salary",
-        "groupBy": "location_country",
+        "groupBy": "job_location_normalized",
     }
