@@ -150,6 +150,60 @@ async def create_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_where_clause_from_filters(filters: List[Dict[str, Any]]) -> str:
+    """
+    Build a WHERE clause from filter conditions.
+
+    Args:
+        filters: List of filter condition dictionaries
+
+    Returns:
+        SQL WHERE clause string (without 'WHERE' prefix)
+    """
+    if not filters:
+        return ""
+
+    conditions = []
+    for i, f in enumerate(filters):
+        column = f.get("column", "")
+        operator = f.get("operator", "=")
+        value = f.get("value")
+        logic = f.get("logic")
+
+        # Build condition based on operator
+        if operator in ("IS NULL", "IS NOT NULL"):
+            condition = f"{column} {operator}"
+        elif operator == "BETWEEN":
+            if isinstance(value, list) and len(value) == 2:
+                condition = f"{column} BETWEEN '{value[0]}' AND '{value[1]}'"
+            else:
+                continue
+        elif operator in ("IN", "NOT IN"):
+            if isinstance(value, list):
+                values_str = ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in value)
+                condition = f"{column} {operator} ({values_str})"
+            else:
+                continue
+        elif operator in ("LIKE", "ILIKE", "NOT LIKE", "NOT ILIKE"):
+            condition = f"{column} {operator} '{value}'"
+        else:
+            # Standard comparison operators
+            if isinstance(value, str):
+                condition = f"{column} {operator} '{value}'"
+            elif isinstance(value, bool):
+                condition = f"{column} {operator} {str(value).lower()}"
+            else:
+                condition = f"{column} {operator} {value}"
+
+        conditions.append(condition)
+
+        # Add logic connector if not last filter and logic is specified
+        if logic and i < len(filters) - 1:
+            conditions.append(logic)
+
+    return " ".join(conditions)
+
+
 @activity.defn
 async def execute_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -171,33 +225,53 @@ async def execute_view_migration(params: Dict[str, Any]) -> Dict[str, Any]:
 
     db = SessionLocal()
     try:
-        # Get columns from custom_materialized_views table
+        # Get columns and filters from custom_materialized_views table
         result = db.execute(
-            text("SELECT columns FROM custom_materialized_views WHERE id = :view_id"),
+            text("SELECT columns, filters FROM custom_materialized_views WHERE id = :view_id"),
             {"view_id": view_id}
         ).fetchone()
 
         if not result:
             raise ValueError(f"View record not found for id: {view_id}")
 
-        columns = result.columns
+        # Access by index since raw SQL results may not have named attributes
+        columns = result[0]  # columns is first
+        filters = result[1] if len(result) > 1 else None  # filters is second
+
+        logger.info(f"[Execute Activity] Columns from DB: {columns}")
+        logger.info(f"[Execute Activity] Filters from DB: {filters}")
 
         # Build and execute CREATE MATERIALIZED VIEW statement
         columns_sql = ", ".join(columns)
+
+        # Build WHERE clause from filters if present
+        where_clause = ""
+        if filters:
+            logger.info(f"[Execute Activity] Building WHERE clause from {len(filters)} filter(s)")
+            filter_sql = build_where_clause_from_filters(filters)
+            if filter_sql:
+                where_clause = f"WHERE {filter_sql}"
+                logger.info(f"[Execute Activity] Applying filters: {where_clause}")
+            else:
+                logger.warning("[Execute Activity] Filter SQL was empty after building")
+        else:
+            logger.info("[Execute Activity] No filters to apply")
 
         create_sql = f"""
             CREATE MATERIALIZED VIEW {view_name} AS
             SELECT {columns_sql}
             FROM mv_root_data
+            {where_clause}
         """
 
         logger.info(f"[Execute Activity] Executing: CREATE MATERIALIZED VIEW {view_name}")
         db.execute(text(create_sql))
 
-        # Create unique index on id
-        index_sql = f"CREATE UNIQUE INDEX idx_{view_name}_id ON {view_name}(id)"
-        logger.info(f"[Execute Activity] Creating index: idx_{view_name}_id")
-        db.execute(text(index_sql))
+        # Create unique index on id (only if id column is present)
+        if "id" in columns:
+            index_sql = f"CREATE UNIQUE INDEX idx_{view_name}_id ON {view_name}(id)"
+            logger.info(f"[Execute Activity] Creating index: idx_{view_name}_id")
+            db.execute(text(index_sql))
 
         db.commit()
 

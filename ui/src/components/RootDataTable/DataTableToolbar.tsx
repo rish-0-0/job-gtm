@@ -76,12 +76,10 @@ export function DataTableToolbar({
         )}
       </div>
 
-      {hasChanges && (
-        <Button onClick={onSaveView}>
-          <Save className="h-4 w-4 mr-2" />
-          Save as View
-        </Button>
-      )}
+      <Button onClick={onSaveView}>
+        <Save className="h-4 w-4 mr-2" />
+        Save as View
+      </Button>
     </div>
   )
 }

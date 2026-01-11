@@ -1,10 +1,12 @@
 import { useState, useRef, useCallback } from 'react'
 import { AgGridReact } from 'ag-grid-react'
-import { useRootData, useSalaryByLocation } from '../api/rootData'
+import { useRootData, useSalaryByLocation, useColumns } from '../api/rootData'
+import type { FilterCondition } from '../api/rootData'
 import { useCreateView } from '../api/customViews'
 import RootDataTable from '../components/RootDataTable'
 import { DataTableToolbar } from '../components/RootDataTable/DataTableToolbar'
 import { SaveViewDialog } from '../components/RootDataTable/SaveViewDialog'
+import { FilterBuilder } from '../components/FilterBuilder'
 import { SalaryByLocationChart } from '../components/charts/SalaryByLocationChart'
 import { useGridState } from '../hooks/useGridState'
 import { useToast } from '../hooks/use-toast'
@@ -15,6 +17,8 @@ const PAGE_SIZE = 50
 function RootDataPage() {
   const [page, setPage] = useState(1)
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
+  const [filters, setFilters] = useState<FilterCondition[]>([])
+  const [appliedFilters, setAppliedFilters] = useState<FilterCondition[]>([])
   const gridRef = useRef<AgGridReact>(null)
   const { toast } = useToast()
 
@@ -23,6 +27,7 @@ function RootDataPage() {
     hasChanges,
     toggleColumnVisibility,
     toggleGroupBy,
+    updateFilters,
     syncFromGrid,
     resetToDefault,
     getSortParam,
@@ -32,11 +37,15 @@ function RootDataPage() {
   const sortParam = getSortParam()
   const groupByParam = getGroupByParam()
 
+  // Fetch column metadata for filter builder
+  const { data: columnsData } = useColumns()
+
   const { data, isLoading, isError, error } = useRootData(
     page,
     PAGE_SIZE,
     sortParam,
-    groupByParam
+    groupByParam,
+    appliedFilters.length > 0 ? appliedFilters : undefined
   )
 
   const { data: chartData, isLoading: chartLoading } = useSalaryByLocation(15)
@@ -76,8 +85,38 @@ function RootDataPage() {
 
   const handleReset = useCallback(() => {
     resetToDefault()
+    setFilters([])
+    setAppliedFilters([])
     setPage(1)
   }, [resetToDefault])
+
+  const handleFiltersChange = useCallback((newFilters: FilterCondition[]) => {
+    setFilters(newFilters)
+  }, [])
+
+  const handleApplyFilters = useCallback(() => {
+    console.log('[RootDataPage] Applying filters:', filters)
+    setAppliedFilters(filters)
+    updateFilters(filters) // Sync with grid state for saving views
+    setPage(1)
+    if (filters.length > 0) {
+      toast({
+        title: 'Filters applied',
+        description: `${filters.length} filter${filters.length > 1 ? 's' : ''} applied to the data.`,
+      })
+    }
+  }, [filters, updateFilters, toast])
+
+  const handleClearFilters = useCallback(() => {
+    setFilters([])
+    setAppliedFilters([])
+    updateFilters([]) // Clear from grid state
+    setPage(1)
+    toast({
+      title: 'Filters cleared',
+      description: 'All filters have been removed.',
+    })
+  }, [updateFilters, toast])
 
   const handleSaveView = useCallback(
     async (request: SaveViewRequest) => {
@@ -124,6 +163,18 @@ function RootDataPage() {
           isLoading={chartLoading}
         />
       </div>
+
+      {columnsData?.columns && (
+        <div className="filter-container" style={{ marginBottom: '1rem' }}>
+          <FilterBuilder
+            columns={columnsData.columns}
+            filters={filters}
+            onFiltersChange={handleFiltersChange}
+            onApply={handleApplyFilters}
+            onClear={handleClearFilters}
+          />
+        </div>
+      )}
 
       <DataTableToolbar
         hiddenColumns={currentState.hiddenColumns}
@@ -199,6 +250,7 @@ function RootDataPage() {
         open={saveDialogOpen}
         onClose={() => setSaveDialogOpen(false)}
         viewState={currentState}
+        appliedFilters={appliedFilters}
         onSave={handleSaveView}
         isLoading={createViewMutation.isPending}
       />

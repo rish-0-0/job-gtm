@@ -3,11 +3,19 @@ export interface SortItem {
   direction: 'asc' | 'desc'
 }
 
+export interface FilterCondition {
+  column: string
+  operator: string
+  value: any
+  logic?: 'AND' | 'OR' | null
+}
+
 export interface GridViewState {
   columnOrder: string[]
   hiddenColumns: string[]
   sorting: SortItem[]
   groupBy: string[]
+  filters: FilterCondition[]
 }
 
 export interface SaveViewRequest {
@@ -15,6 +23,7 @@ export interface SaveViewRequest {
   display_name: string
   description?: string
   columns: string[]
+  filters?: FilterCondition[]
 }
 
 export interface CustomView {
@@ -100,4 +109,5 @@ export const DEFAULT_VIEW_STATE: GridViewState = {
   hiddenColumns: [],
   sorting: [],
   groupBy: [],
+  filters: [],
 }

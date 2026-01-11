@@ -24,6 +24,12 @@ interface TriggerEnrichmentResponse {
   workflow_id?: string
 }
 
+interface TriggerScrapeResponse {
+  workflow_id: string
+  run_id: string
+  status: string
+}
+
 export async function refreshMaterializedView(viewName: string): Promise<RefreshViewResponse> {
   const response = await apiClient.post<RefreshViewResponse>('/workflows/views/refresh', {
     view_name: viewName,
@@ -80,5 +86,16 @@ export async function triggerEnrichment(): Promise<TriggerEnrichmentResponse> {
 export function useTriggerEnrichment() {
   return useMutation({
     mutationFn: triggerEnrichment,
+  })
+}
+
+export async function triggerScrape(): Promise<TriggerScrapeResponse> {
+  const response = await apiClient.post<TriggerScrapeResponse>('/workflows/scrape/trigger')
+  return response.data
+}
+
+export function useTriggerScrape() {
+  return useMutation({
+    mutationFn: triggerScrape,
   })
 }

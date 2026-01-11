@@ -5,6 +5,7 @@ import {
   GridViewState,
   DEFAULT_VIEW_STATE,
   SortItem,
+  FilterCondition,
   ALL_COLUMNS,
 } from '../types/gridState'
 
@@ -64,6 +65,18 @@ export function useGridState(gridRef: RefObject<AgGridReact | null>) {
         groupBy: isGrouped
           ? prev.groupBy.filter((c) => c !== columnId)
           : [...prev.groupBy, columnId],
+      }
+    })
+  }, [])
+
+  const updateFilters = useCallback((filters: FilterCondition[]) => {
+    console.log('[useGridState] updateFilters called with:', filters)
+    setCurrentState((prev) => {
+      console.log('[useGridState] Previous filters:', prev.filters)
+      console.log('[useGridState] New filters:', filters)
+      return {
+        ...prev,
+        filters,
       }
     })
   }, [])
@@ -163,6 +176,7 @@ export function useGridState(gridRef: RefObject<AgGridReact | null>) {
     updateSorting,
     updateGroupBy,
     toggleGroupBy,
+    updateFilters,
     getVisibleOrderedColumns,
     syncFromGrid,
     resetToDefault,

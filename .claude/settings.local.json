@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\Users\\\\risha\\\\OneDrive\\\\Desktop\\\\job-gtm\\\\api\")",
+      "Bash(dir:*)",
+      "Bash(npm run build:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(curl:*)",
+      "Bash(test:*)",
+      "Bash(psql:*)",
+      "Bash(docker exec:*)",
+      "Bash(python -m json.tool:*)",
+      "Bash(npx tsc:*)",
+      "Bash(docker-compose logs:*)",
+      "Bash(docker-compose ps:*)",
+      "Bash(docker compose:*)"
+    ]
+  }
+}

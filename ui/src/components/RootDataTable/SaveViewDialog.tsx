@@ -17,12 +17,33 @@ import {
   SaveViewRequest,
   COLUMN_LABELS,
   ColumnId,
+  FilterCondition,
 } from '../../types/gridState'
+
+// Operator labels for display
+const OPERATOR_LABELS: Record<string, string> = {
+  '=': 'equals',
+  '!=': 'not equals',
+  '>': 'greater than',
+  '<': 'less than',
+  '>=': 'greater or equal',
+  '<=': 'less or equal',
+  'LIKE': 'contains',
+  'ILIKE': 'contains',
+  'NOT LIKE': 'not contains',
+  'NOT ILIKE': 'not contains',
+  'IN': 'in list',
+  'NOT IN': 'not in list',
+  'IS NULL': 'is empty',
+  'IS NOT NULL': 'is not empty',
+  'BETWEEN': 'between',
+}
 
 interface SaveViewDialogProps {
   open: boolean
   onClose: () => void
   viewState: GridViewState
+  appliedFilters?: FilterCondition[]  // Explicit filters to ensure they're included
   onSave: (request: SaveViewRequest) => void
   isLoading?: boolean
 }
@@ -31,6 +52,7 @@ export function SaveViewDialog({
   open,
   onClose,
   viewState,
+  appliedFilters,
   onSave,
   isLoading = false,
 }: SaveViewDialogProps) {
@@ -39,9 +61,19 @@ export function SaveViewDialog({
   const [description, setDescription] = useState('')
   const [nameError, setNameError] = useState<string | null>(null)
 
-  const visibleColumns = viewState.columnOrder.filter(
-    (col) => !viewState.hiddenColumns.includes(col)
-  )
+  // Use appliedFilters if provided, otherwise fall back to viewState.filters
+  const effectiveFilters = appliedFilters ?? viewState.filters
+
+  // Debug: Log filters when dialog opens
+  console.log('[SaveViewDialog] Rendered with viewState.filters:', viewState.filters)
+  console.log('[SaveViewDialog] Rendered with appliedFilters:', appliedFilters)
+  console.log('[SaveViewDialog] Using effectiveFilters:', effectiveFilters)
+
+  // When groupBy is active, use grouped columns; otherwise use visible columns
+  const isGrouped = viewState.groupBy.length > 0
+  const viewColumns = isGrouped
+    ? viewState.groupBy
+    : viewState.columnOrder.filter((col) => !viewState.hiddenColumns.includes(col))
 
   const validateName = (value: string) => {
     const sanitized = value.toLowerCase().replace(/[^a-z0-9_]/g, '')
@@ -61,11 +93,14 @@ export function SaveViewDialog({
   const handleSave = () => {
     if (nameError || name.length < 3 || displayName.length < 3) return
 
+    console.log('[SaveViewDialog] Saving view with effectiveFilters:', effectiveFilters)
+
     onSave({
       name,
       display_name: displayName,
       description: description || undefined,
-      columns: visibleColumns,
+      columns: viewColumns,
+      filters: effectiveFilters.length > 0 ? effectiveFilters : undefined,
     })
   }
 
@@ -81,7 +116,7 @@ export function SaveViewDialog({
     name.length >= 3 &&
     displayName.length >= 3 &&
     !nameError &&
-    visibleColumns.length > 0
+    viewColumns.length > 0
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -134,16 +169,45 @@ export function SaveViewDialog({
           <div className="border rounded-lg p-4 space-y-3">
             <div>
               <h4 className="font-medium mb-2">
-                Columns ({visibleColumns.length})
+                Columns ({viewColumns.length})
+                {isGrouped && <span className="text-muted-foreground font-normal ml-2">(grouped)</span>}
               </h4>
               <div className="flex flex-wrap gap-1">
-                {visibleColumns.map((col) => (
+                {viewColumns.map((col) => (
                   <Badge key={col} variant="secondary" className="text-xs">
-                    {COLUMN_LABELS[col as ColumnId]}
+                    {COLUMN_LABELS[col as ColumnId] || col}
                   </Badge>
                 ))}
               </div>
             </div>
+
+            {effectiveFilters.length > 0 && (
+              <div>
+                <h4 className="font-medium mb-2">Filters ({effectiveFilters.length})</h4>
+                <div className="flex flex-col gap-1">
+                  {effectiveFilters.map((filter, index) => (
+                    <div key={index} className="flex items-center gap-1 text-xs">
+                      {index > 0 && filter.logic && (
+                        <Badge variant="outline" className="text-xs">
+                          {filter.logic}
+                        </Badge>
+                      )}
+                      <Badge variant="secondary" className="text-xs">
+                        {COLUMN_LABELS[filter.column as ColumnId] || filter.column}
+                      </Badge>
+                      <span className="text-muted-foreground">
+                        {OPERATOR_LABELS[filter.operator] || filter.operator}
+                      </span>
+                      {!['IS NULL', 'IS NOT NULL'].includes(filter.operator) && (
+                        <span className="font-medium">
+                          {Array.isArray(filter.value) ? filter.value.join(', ') : String(filter.value)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {viewState.sorting.length > 0 && (
               <div>
@@ -159,20 +223,13 @@ export function SaveViewDialog({
               </div>
             )}
 
-            {viewState.groupBy.length > 0 && (
-              <div>
-                <h4 className="font-medium mb-2">Grouped By</h4>
-                <div className="flex flex-wrap gap-1">
-                  {viewState.groupBy.map((col) => (
-                    <Badge key={col} variant="outline" className="text-xs">
-                      {COLUMN_LABELS[col as ColumnId]}
-                    </Badge>
-                  ))}
-                </div>
+            {isGrouped && (
+              <div className="text-sm text-muted-foreground">
+                View will contain only grouped columns
               </div>
             )}
 
-            {viewState.hiddenColumns.length > 0 && (
+            {!isGrouped && viewState.hiddenColumns.length > 0 && (
               <div className="text-sm text-muted-foreground">
                 {viewState.hiddenColumns.length} column(s) hidden and excluded from view
               </div>
