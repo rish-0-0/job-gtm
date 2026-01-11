@@ -6,7 +6,7 @@ import re
 import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, field_validator
-from typing import List, Optional
+from typing import List, Optional, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from temporalio.client import Client
@@ -46,12 +46,21 @@ RESERVED_VIEW_NAMES = [
 ]
 
 
+class FilterCondition(BaseModel):
+    """Single filter condition for a view."""
+    column: str
+    operator: str
+    value: Optional[Any] = None
+    logic: Optional[str] = None  # AND/OR
+
+
 class CreateViewRequest(BaseModel):
     """Request body for creating a custom materialized view."""
     name: str  # User-friendly name (e.g., "my_sales_jobs")
     display_name: str  # Display name for UI (e.g., "My Sales Jobs")
     description: Optional[str] = None
     columns: List[str]  # Ordered list of columns to include
+    filters: Optional[List[FilterCondition]] = None  # Optional filters to apply
 
     @field_validator("name")
     @classmethod
@@ -236,24 +245,53 @@ async def create_custom_view(
         )
 
     # Insert record with pending status
-    # Convert columns list to JSON string for JSONB column
-    result = db.execute(
-        text("""
-            INSERT INTO custom_materialized_views
-            (name, display_name, description, columns, view_name, status)
-            VALUES (:name, :display_name, :description, CAST(:columns AS jsonb), :view_name, 'pending')
-            RETURNING id
-        """),
-        {
-            "name": request.name,
-            "display_name": request.display_name,
-            "description": request.description,
-            "columns": json.dumps(request.columns),
-            "view_name": view_name,
-        }
-    )
+    # Convert columns and filters to JSON strings for JSONB columns
+    filters_json = None
+    if request.filters and len(request.filters) > 0:
+        filters_json = json.dumps([f.model_dump() for f in request.filters])
+        print(f"[Create View] Storing {len(request.filters)} filters: {filters_json}")
+    else:
+        print(f"[Create View] No filters to store")
+
+    # Use different SQL based on whether filters are provided
+    if filters_json:
+        result = db.execute(
+            text("""
+                INSERT INTO custom_materialized_views
+                (name, display_name, description, columns, filters, view_name, status)
+                VALUES (:name, :display_name, :description, CAST(:columns AS jsonb),
+                        CAST(:filters AS jsonb), :view_name, 'pending')
+                RETURNING id
+            """),
+            {
+                "name": request.name,
+                "display_name": request.display_name,
+                "description": request.description,
+                "columns": json.dumps(request.columns),
+                "filters": filters_json,
+                "view_name": view_name,
+            }
+        )
+    else:
+        result = db.execute(
+            text("""
+                INSERT INTO custom_materialized_views
+                (name, display_name, description, columns, filters, view_name, status)
+                VALUES (:name, :display_name, :description, CAST(:columns AS jsonb),
+                        NULL, :view_name, 'pending')
+                RETURNING id
+            """),
+            {
+                "name": request.name,
+                "display_name": request.display_name,
+                "description": request.description,
+                "columns": json.dumps(request.columns),
+                "view_name": view_name,
+            }
+        )
     view_id = result.fetchone()[0]
     db.commit()
+    print(f"[Create View] Created view record with id: {view_id}")
 
     # Start Temporal workflow
     try:
@@ -282,6 +320,7 @@ async def create_custom_view(
                 "view_name": view_name,
                 "columns": request.columns,
                 "display_name": request.display_name,
+                "filters": [f.model_dump() for f in request.filters] if request.filters else None,
             },
             id=workflow_id,
             task_queue=TEMPORAL_TASK_QUEUE,

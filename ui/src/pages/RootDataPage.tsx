@@ -27,6 +27,7 @@ function RootDataPage() {
     hasChanges,
     toggleColumnVisibility,
     toggleGroupBy,
+    updateFilters,
     syncFromGrid,
     resetToDefault,
     getSortParam,
@@ -94,7 +95,9 @@ function RootDataPage() {
   }, [])
 
   const handleApplyFilters = useCallback(() => {
+    console.log('[RootDataPage] Applying filters:', filters)
     setAppliedFilters(filters)
+    updateFilters(filters) // Sync with grid state for saving views
     setPage(1)
     if (filters.length > 0) {
       toast({
@@ -102,17 +105,18 @@ function RootDataPage() {
         description: `${filters.length} filter${filters.length > 1 ? 's' : ''} applied to the data.`,
       })
     }
-  }, [filters, toast])
+  }, [filters, updateFilters, toast])
 
   const handleClearFilters = useCallback(() => {
     setFilters([])
     setAppliedFilters([])
+    updateFilters([]) // Clear from grid state
     setPage(1)
     toast({
       title: 'Filters cleared',
       description: 'All filters have been removed.',
     })
-  }, [toast])
+  }, [updateFilters, toast])
 
   const handleSaveView = useCallback(
     async (request: SaveViewRequest) => {
@@ -246,6 +250,7 @@ function RootDataPage() {
         open={saveDialogOpen}
         onClose={() => setSaveDialogOpen(false)}
         viewState={currentState}
+        appliedFilters={appliedFilters}
         onSave={handleSaveView}
         isLoading={createViewMutation.isPending}
       />

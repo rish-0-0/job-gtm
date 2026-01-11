@@ -35,6 +35,7 @@ class CreateCustomViewWorkflow:
                 - view_name: Actual postgres view name (mv_custom_xxx)
                 - columns: Ordered list of columns
                 - display_name: Display name for UI
+                - filters: Optional list of filter conditions
 
         Returns:
             Summary of workflow execution
@@ -44,6 +45,7 @@ class CreateCustomViewWorkflow:
         view_name = params["view_name"]
         columns = params["columns"]
         display_name = params["display_name"]
+        filters = params.get("filters")  # Optional filters
 
         workflow.logger.info(
             f"[Create View Workflow] ════════════════════════════════════════"
@@ -54,6 +56,10 @@ class CreateCustomViewWorkflow:
         workflow.logger.info(
             f"[Create View Workflow] Columns: {columns}"
         )
+        if filters:
+            workflow.logger.info(
+                f"[Create View Workflow] Filters: {len(filters)} condition(s)"
+            )
         workflow.logger.info(
             f"[Create View Workflow] ════════════════════════════════════════"
         )
@@ -69,6 +75,7 @@ class CreateCustomViewWorkflow:
                     "name": name,
                     "view_name": view_name,
                     "columns": columns,
+                    "filters": filters,
                 }],
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(
@@ -94,6 +101,7 @@ class CreateCustomViewWorkflow:
                     "name": name,
                     "view_name": view_name,
                     "columns": columns,
+                    "filters": filters,
                 }],
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(
