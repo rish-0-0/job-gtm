@@ -1,87 +1,73 @@
-# JOB BOARDS INTELLIGENCE PLATFORM GTM
+# Job Boards Intelligence Platform
+
+Scalable job scraping and AI enrichment pipeline.
 
 ## Architecture
 
-This platform consists of:
-- **PostgreSQL Database**: Persistent data storage (port 5432)
-- **RabbitMQ**: Message queue for reliable job data processing (ports 5672, 15672)
-- **Temporal Server**: Workflow orchestration engine (ports 7233, 8233)
-- **Scraper Service**: API service for triggering web scrapers with Puppeteer pre-installed (port 6000)
-- **Workflow Service**: FastAPI service for orchestrating scraping and AI workflows via Temporal (port 8000)
-- **Queue Consumer**: Background service for processing scraped jobs from RabbitMQ
-- **Ollama LLM**: GPU-accelerated local LLM service with Llama 3.2 3B (port 11434) - See [OLLAMA_SETUP.md](OLLAMA_SETUP.md)
+```
+Scrapers → RabbitMQ → AI Enrichment → PostgreSQL (pgvector)
+              ↓
+         Temporal (orchestration)
+              ↓
+         Redis (query cache)
+```
 
-## Prerequisites
+**Stack:** PostgreSQL + pgvector, RabbitMQ, Temporal, Redis, Ollama (local LLM), Puppeteer
 
-- Docker and Docker Compose installed
-- At least 5GB of free disk space
-  - Puppeteer image: ~400MB
-  - Ollama + Llama 3.2 3B model: ~2GB
-  - Database and logs: ~2-3GB
-- **For GPU support (Ollama)**: NVIDIA GPU with CUDA support + nvidia-container-toolkit
-  - See [OLLAMA_SETUP.md](OLLAMA_SETUP.md) for GPU setup instructions
+## FAQ
 
-## Building and Running
+### How do you handle 50k requests without getting banned?
 
-### Initial Setup
+**List-page scraping, not detail-page scraping.** Each job board page returns ~20 jobs. To get 50k jobs, we make ~2,500 page requests instead of 50,000 individual job requests.
 
-Build and start all services:
+- Scrape listing pages only (job cards contain most metadata)
+- Rate limiting with delays between requests
+- User agent rotation
+- Headless browser (Puppeteer) mimics real browser behavior
+
+### How much would this cost in LLM tokens?
+
+**Currently ~$0** - Dev uses local Ollama. Production costs depend on model choice.
+
+**Token usage per operation:**
+
+| Operation | Input Tokens | Output Tokens | Per 50k Jobs |
+|-----------|-------------|---------------|--------------|
+| AI Enrichment (per job) | ~1,800 | ~1,000 | 140M tokens |
+| Text-to-SQL (per query) | ~1,200 | ~100 | N/A |
+| Embeddings | N/A | N/A | Free (local) |
+
+**Production cost estimates (50k jobs):**
+
+| Model | AI Enrichment Cost |
+|-------|-------------------|
+| GPT-4o mini | ~$25 |
+| Claude Haiku | ~$35 |
+| GPT-4o | ~$500 |
+| Claude Sonnet | ~$600 |
+
+*AI enrichment uses smaller/cheaper models. Text-to-SQL uses better models but runs infrequently (user queries only).*
+
+Embeddings: `sentence-transformers/all-MiniLM-L6-v2` (384 dims, ~40ms CPU) - always free.
+
+### How would you scale to 1 Million jobs?
+
+1. **RabbitMQ queuing** - Decouples scraping from processing. Scraped jobs queue in `raw_jobs` → consumers process at their own pace → enriched jobs queue in `enriched_jobs` → final DB write. Handles backpressure naturally.
+
+2. **Temporal workflows** - Orchestrates scraping across multiple job boards. Handles retries, failures, and distributed coordination.
+
+3. **Batch processing** - Consumers process jobs in batches (configurable batch size/timeout). Reduces DB round-trips.
+
+4. **Horizontal scaling** - Spin up more Temporal workers and queue consumers. Docker Compose already runs 2 worker replicas.
+
+5. **pgvector** - Vector similarity search for semantic job matching. Scales with proper indexing (IVFFlat/HNSW).
+
+6. **Redis caching** - Caches NL query results to reduce repeated LLM calls.
+
+## Quick Start
 
 ```bash
 docker compose up -d --build
 ```
 
-This will:
-1. Start the PostgreSQL database on port 5432
-2. Start the Temporal server on ports 7233, 8233
-3. Build and start the scraper service on port 6000 with Puppeteer pre-installed (~200MB)
-4. Build and start the workflow service on port 8000
-5. **Automatically create and apply database migrations** (on first run)
-
-### Rebuilding the Scraper Service
-
-If you make changes to the scraper code, rebuild the image:
-
-```bash
-docker compose build scraper
-docker compose up -d scraper
-```
-
-### Stopping Services
-
-```bash
-docker compose down
-```
-
-## API Endpoints
-
-### Trigger All Scrapers
-
-Start scraping workflow for all available scrapers:
-
-```bash
-curl -X POST http://localhost:8000/workflows/scrape/trigger
-```
-
-### Trigger Single Scraper
-
-Start scraping workflow for a specific scraper:
-
-```bash
-# Dice scraper
-curl -X POST http://localhost:8000/workflows/scrape/trigger/dice
-
-# SimplyHired scraper
-curl -X POST http://localhost:8000/workflows/scrape/trigger/simplyhired
-
-# ZipRecruiter scraper
-curl -X POST http://localhost:8000/workflows/scrape/trigger/ziprecruiter
-```
-
-### Delete PostgreSQL Data
-
-To clear all scraped job data from the database:
-
-```bash
-docker compose exec postgres psql -U postgres -d jobgtm -c "TRUNCATE TABLE job_listings RESTART IDENTITY CASCADE;"
-```
+Services: PostgreSQL (5432), RabbitMQ (5672/15672), Temporal (7233/8233), Redis (6379), Ollama (11434), API (8001), UI (3000)
