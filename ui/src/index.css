@@ -382,7 +382,7 @@ body {
   display: flex;
   flex-direction: column;
   height: calc(100vh - 80px);
-  max-width: 1200px;
+  max-width: 1600px;
   margin: 0 auto;
 }
 
@@ -434,6 +434,8 @@ body {
 .assistant-message .message-content {
   background-color: hsl(var(--muted));
   color: hsl(var(--foreground));
+  max-width: 100%;
+  width: 100%;
 }
 
 .message-label {

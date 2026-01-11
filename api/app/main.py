@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import root_data, workflows, custom_views, nl_query
+from app.routers import root_data, workflows, custom_views, nl_query, data_cleanup
 
 app = FastAPI(
     title="Job GTM Dashboard API",
@@ -23,6 +23,7 @@ app.include_router(root_data.router, prefix="/api", tags=["root-data"])
 app.include_router(workflows.router, prefix="/api/workflows", tags=["workflows"])
 app.include_router(custom_views.router, prefix="/api/views", tags=["custom-views"])
 app.include_router(nl_query.router, prefix="/api/nl-query", tags=["natural-language-query"])
+app.include_router(data_cleanup.router, tags=["data-cleanup"])
 
 
 @app.get("/")

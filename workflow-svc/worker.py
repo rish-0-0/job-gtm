@@ -15,6 +15,8 @@ from workflows.detail_scrape_workflow import DetailScrapeWorkflow, DetailScrapeC
 from workflows.refresh_view_workflow import RefreshMaterializedViewWorkflow
 from workflows.create_view_workflow import CreateCustomViewWorkflow
 from workflows.delete_view_workflow import DeleteCustomViewWorkflow
+from workflows.data_cleanup_workflow import DataCleanupWorkflow
+from workflows.salary_normalization_workflow import SalaryNormalizationWorkflow
 from activities.scrape_activities import (
     get_available_scrapers,
     call_scraper_service,
@@ -50,7 +52,9 @@ from activities.create_view_activities import (
     execute_delete_view_migration,
     remove_view_record,
 )
+from activities.data_cleanup_activities import DataCleanupActivities
 from queue_config import setup_queues, close_rabbitmq_connection
+from database import DATABASE_URL
 
 # Configure logging
 logging.basicConfig(
@@ -86,6 +90,9 @@ async def main():
             logger.warning(f"RabbitMQ setup failed (attempt {attempt}/{max_attempts}): {str(e)}, retrying in 2s...")
             await asyncio.sleep(2)
 
+    # Initialize data cleanup activities with database connection
+    data_cleanup_activities = DataCleanupActivities(DATABASE_URL)
+
     # Create worker with increased concurrency
     logger.info(f"Starting worker on task queue: {TEMPORAL_TASK_QUEUE}")
     worker = Worker(
@@ -99,6 +106,8 @@ async def main():
             RefreshMaterializedViewWorkflow,
             CreateCustomViewWorkflow,
             DeleteCustomViewWorkflow,
+            DataCleanupWorkflow,  # Data cleanup workflow
+            SalaryNormalizationWorkflow,  # Salary normalization workflow
         ],
         activities=[
             # Scrape activities
@@ -130,6 +139,12 @@ async def main():
             create_delete_view_migration,
             execute_delete_view_migration,
             remove_view_record,
+            # Data cleanup activities
+            data_cleanup_activities.verify_index_health,
+            data_cleanup_activities.repair_indexes,
+            data_cleanup_activities.cleanup_job_listings_data,
+            data_cleanup_activities.refresh_materialized_view,
+            data_cleanup_activities.normalize_salaries_to_usd,
         ],
         max_concurrent_workflow_tasks=200,
         max_concurrent_activities=100,

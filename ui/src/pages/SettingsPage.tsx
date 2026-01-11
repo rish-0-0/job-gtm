@@ -1,8 +1,8 @@
-import { RefreshCw, Database, Sparkles, Play } from 'lucide-react'
+import { RefreshCw, Database, Sparkles, Play, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
-import { useRefreshMaterializedView, useRefreshStatus, useTriggerEnrichment } from '@/api/workflows'
+import { useRefreshMaterializedView, useRefreshStatus, useTriggerEnrichment, useTriggerScrape } from '@/api/workflows'
 import { useState, useRef, useCallback } from 'react'
 
 const MATERIALIZED_VIEWS = [
@@ -19,9 +19,12 @@ function SettingsPage() {
   const { toast } = useToast()
   const refreshMutation = useRefreshMaterializedView()
   const enrichmentMutation = useTriggerEnrichment()
+  const scrapeMutation = useTriggerScrape()
   const [refreshingView, setRefreshingView] = useState<string | null>(null)
   const [isEnrichmentDebounced, setIsEnrichmentDebounced] = useState(false)
+  const [isScrapeDebounced, setIsScrapeDebounced] = useState(false)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scrapeDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const { data: statusData } = useRefreshStatus(
     refreshingView || 'mv_root_data',
@@ -114,6 +117,41 @@ function SettingsPage() {
     }
   }, [isEnrichmentDebounced, enrichmentMutation, toast])
 
+  const handleTriggerScrape = useCallback(async () => {
+    if (isScrapeDebounced || scrapeMutation.isPending) {
+      return
+    }
+
+    // Set debounce state
+    setIsScrapeDebounced(true)
+
+    // Clear any existing timer
+    if (scrapeDebounceTimerRef.current) {
+      clearTimeout(scrapeDebounceTimerRef.current)
+    }
+
+    // Set timer to reset debounce
+    scrapeDebounceTimerRef.current = setTimeout(() => {
+      setIsScrapeDebounced(false)
+    }, DEBOUNCE_MS)
+
+    try {
+      const result = await scrapeMutation.mutateAsync()
+
+      toast({
+        title: 'Scraping Pipeline Triggered',
+        description: `Workflow started with ID: ${result.workflow_id}`,
+        variant: 'success',
+      })
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to trigger scraping pipeline',
+        variant: 'destructive',
+      })
+    }
+  }, [isScrapeDebounced, scrapeMutation, toast])
+
   return (
     <>
       <div className="page-header">
@@ -159,6 +197,38 @@ function SettingsPage() {
                   </Button>
                 </div>
               ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="bg-card border-border">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-card-foreground">
+              <Search className="h-5 w-5" />
+              Scraping Pipeline
+            </CardTitle>
+            <CardDescription>
+              Trigger the scraping pipeline to collect new job listings from all configured sources.
+              This runs all scrapers (Dice, SimplyHired, ZipRecruiter, etc.) to find new jobs.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50 border border-border">
+              <div>
+                <h4 className="font-medium text-foreground">Scrape All Sources</h4>
+                <p className="text-sm text-muted-foreground">
+                  Run all configured scrapers to collect new job listings from job boards.
+                </p>
+              </div>
+              <Button
+                onClick={handleTriggerScrape}
+                disabled={scrapeMutation.isPending || isScrapeDebounced}
+                variant="default"
+                size="sm"
+              >
+                <Play className="h-4 w-4 mr-2" />
+                {scrapeMutation.isPending ? 'Triggering...' : 'Trigger Scraping'}
+              </Button>
             </div>
           </CardContent>
         </Card>

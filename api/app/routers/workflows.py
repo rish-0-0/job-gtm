@@ -3,6 +3,7 @@ Workflow management endpoints.
 Triggers Temporal workflows and checks their status.
 """
 import uuid
+import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
@@ -11,7 +12,7 @@ from sqlalchemy import text
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from app.config import TEMPORAL_ADDRESS, TEMPORAL_TASK_QUEUE
+from app.config import TEMPORAL_ADDRESS, TEMPORAL_TASK_QUEUE, WORKFLOW_SERVICE_URL
 from app.database import get_db
 
 router = APIRouter()
@@ -187,4 +188,70 @@ async def get_refresh_status(view_name: str, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get workflow status: {str(e)}"
+        )
+
+
+# ==================== WORKFLOW SERVICE PROXY ENDPOINTS ====================
+
+class TriggerWorkflowResponse(BaseModel):
+    workflow_id: str
+    run_id: str
+    status: str
+
+
+class TriggerEnrichmentResponse(BaseModel):
+    workflow_id: str
+    run_id: str
+    status: str
+
+
+@router.post("/scrape/trigger", response_model=TriggerWorkflowResponse)
+async def trigger_scrape_workflow():
+    """
+    Trigger the scraping workflow to collect new job listings from all sources.
+    Proxies request to the workflow service.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{WORKFLOW_SERVICE_URL}/workflows/scrape/trigger",
+                timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Workflow service error: {e.response.text}"
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to workflow service: {str(e)}"
+        )
+
+
+@router.post("/enrich/trigger", response_model=TriggerEnrichmentResponse)
+async def trigger_enrichment_workflow():
+    """
+    Trigger the AI enrichment workflow to process pending job listings.
+    Proxies request to the workflow service.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{WORKFLOW_SERVICE_URL}/workflows/enrich/trigger",
+                timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Workflow service error: {e.response.text}"
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to workflow service: {str(e)}"
         )

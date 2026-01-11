@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { Database, Settings, Table2, Trash2, Loader2, MessageCircle } from 'lucide-react'
+import { Database, Settings, Table2, Trash2, Loader2, MessageCircle, Wand2 } from 'lucide-react'
 import { useCustomViews, useDeleteView } from '../../api/customViews'
 import { useToast } from '../../hooks/use-toast'
 import { Button } from '../ui/button'
@@ -140,6 +140,17 @@ function Sidebar() {
           {/* Settings */}
           <li className="sidebar-section">
             <span className="sidebar-section-title">System</span>
+          </li>
+          <li>
+            <NavLink
+              to="/cleanup"
+              className={({ isActive }) =>
+                `sidebar-nav-item ${isActive ? 'active' : ''}`
+              }
+            >
+              <Wand2 className="inline-block w-4 h-4 mr-2" />
+              Data Cleanup
+            </NavLink>
           </li>
           <li>
             <NavLink
